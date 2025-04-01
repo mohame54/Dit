@@ -1,0 +1,13 @@
+{
+    "EPOCHS":2000,
+    "CUR_EPOCH":0,
+    "EPOCHS_LOGS":5,
+    "ACCUM_STEPS":1,
+    "RANDOM_CFG":0.2,
+    "USE_ADMW":true,
+    "LOAD_WEIGHTS":true,
+    "LOSS_TYPE":"mse_loss",
+    "GLOBAL_TRAIN_BATCH_SIZE":184,
+    "VAL_BATCH_SIZE":16,
+    "PATH_TO_SAVE":"Dit"
+}
