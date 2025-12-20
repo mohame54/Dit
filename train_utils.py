@@ -1,112 +1,79 @@
-import torchvision.transforms.functional as F_vis
-import torch
-import inspect
-import random
 from tqdm import tqdm
+from Diffusion import RFDiffusion
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-
-
-
-
-# preprocess the data before KID
-def prepare_kid(real,pred):
-    real = F_vis.resize(real.clamp(0,1),(299,299))
-    pred = F_vis.resize(pred.clamp(0,1),(299,299))
-    return real,pred
-
-
-def create_opt(model, weight_decay=0.1,lr=1e-4,betas=[0.9, 0.95], eps=1e-8):
-    params_dict = {nm: p for nm, p in model.named_parameters() if p.requires_grad}
-    to_decay = [ p for nm, p in params_dict.items() if p.dim() >=2 ]
-    no_decay = [ p for nm, p in params_dict.items() if p.dim() <2 ]
-    groups = [
-        {"params": to_decay, "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0}
-    ]
-    fused = "fused" in inspect.signature(torch.optim.Adam).parameters
-    optim = torch.optim.AdamW(groups, lr, betas, eps=eps, fused=fused)
-    print(f"to decay: {sum([p.numel() for p in to_decay])} parameters no decay: {sum([p.numel() for p in no_decay])} parmerers.")
-    return optim
-
-
-mean = lambda x:sum(x)/len(x)
+import torch
 
 
 def train_epoch(
-    model,
+    diff: RFDiffusion,
     train_ds,
     opt,
     rank,
-    scaler,
-    loss_type="mse_loss",
     max_norm=None,
-    update_emma=True,
+    ema_model=None,
+    loss_type="mse_loss",
+    ema_decay=0.999,
     grad_accum_steps=1,
 ):
-    model.train()
+    diff.model.train()
     losses = []
-    loop = tqdm(train_ds, desc="Training loop") if rank == 0 else train_ds
-    opt.zero_grad()
-    loss_accum = 0.0
-
+    loop = tqdm(train_ds, desc="Training") if rank == 0 else train_ds
+    
     for i, (inputs, labels) in enumerate(loop):
-        inputs = inputs.to(rank)
-        labels = labels.to(rank)
-        if isinstance(model.eps_net, DDP):
-           model.eps_net.require_backward_grad_sync = (i + 1) % grad_accum_steps == 0
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            loss = model.train_loss(inputs, labels, loss_type=loss_type, timestamp_dist="uni")
-        scaler.scale(loss).backward()
-        loss_accum += loss.detach()
-
-        if (i + 1) % grad_accum_steps == 0:
+        inputs = inputs.to(rank, non_blocking=True)
+        labels = labels.to(rank, non_blocking=True)
+        
+        is_accumulating = (i + 1) % grad_accum_steps != 0
+        
+        # Control gradient sync for FSDP2
+        if hasattr(diff.model, 'set_requires_gradient_sync'):
+            diff.model.set_requires_gradient_sync(not is_accumulating)
+        
+        loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
+        loss = loss / grad_accum_steps  # Scale loss
+        loss.backward()
+        
+        if not is_accumulating:
             if max_norm is not None:
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                torch.nn.utils.clip_grad_norm_(diff.model.parameters(), max_norm)
             
-            scaler.step(opt)
-            scaler.update()
-            torch.cuda.synchronize()
-            opt.zero_grad()
-
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-
-            if update_emma:
-                model.update_emma()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
             
-            torch.cuda.empty_cache()
-            if rank == 0:
-                losses.append(loss_accum.item())
-                loop.set_postfix({"Training loss": f"{mean(losses):.4f}"})
-            loss_accum = 0.0
-
-    if rank == 0:
-        return mean(losses)
+            if ema_model is not None:
+                update_ema_model_fsdp(diff.model, ema_model, ema_decay)
+        
+        loss_scalar = loss.detach() * grad_accum_steps
+        dist.all_reduce(loss_scalar, op=dist.ReduceOp.AVG)
+        
+        if rank == 0:
+            losses.append(loss_scalar.item())
+            loop.set_postfix({"loss": f"{sum(losses)/len(losses):.4f}"})
+    
+    return losses if rank == 0 else []
 
 
 @torch.no_grad()
-def val_epoch(
-    model,
-    val_ds,
-    rank,
-    loss_type="mse_loss",
-):
-    model.eval()
-    loop = tqdm(val_ds, desc="Validation loop") if rank == 0 else val_ds
+def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss"):
+    diff.model.eval()
     losses = []
-
+    loop = tqdm(val_ds, desc="Validation") if rank == 0 else val_ds
+    
     for inputs, labels in loop:
-        inputs = inputs.to(rank)
-        labels = labels.to(rank)
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            loss = model.train_loss(inputs, labels, loss_type=loss_type, timestamp_dist="uni")
+        inputs = inputs.to(rank, non_blocking=True)
+        labels = labels.to(rank, non_blocking=True)
         
-        loss = loss.detach().item()
-
+        loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
+        
+        # All ranks compute, but only rank 0 logs
         if rank == 0:
-            losses.append(loss)
-            loop.set_postfix({"Validation loss": f"{mean(losses):.4f}"})
+            losses.append(loss.item())
+            loop.set_postfix({"val_loss": f"{sum(losses)/len(losses):.4f}"})
+    
+    return losses if rank == 0 else []
 
-    if rank == 0:
-        return mean(losses)
+
+def update_ema_model_fsdp(model, ema_model, decay):
+    with torch.no_grad():
+        for ema_p, p in zip(ema_model.parameters(), model.parameters()):
+            ema_p.mul_(decay).add_(p, alpha=1 - decay)

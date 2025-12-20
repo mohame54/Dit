@@ -1,0 +1,6 @@
+torch
+Pillow
+pandas
+matplotlib
+diffusers
+huggingface-hub

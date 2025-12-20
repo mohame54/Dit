@@ -9,7 +9,7 @@ class DitConfig:
       freq_dim: int= 256
       hidden_dim:int = 768
       num_blocks:int = 12
-      bias:bool = True
+      bias: bool = True
       qkv_bias:bool = False
       num_classes:int = 2
       tim_mlp_dim: int = 1
@@ -28,7 +28,7 @@ class DitConfig:
 
 
 class DitTimeEmbd(nn.Module):
-  def __init__(self, config):
+  def __init__(self, config: DitConfig):
      super(DitTimeEmbd, self).__init__()
      self.mlp = nn.Sequential(
          nn.Linear(config.freq_dim, config.hidden_dim * config.tim_mlp_dim, config.bias),
@@ -40,11 +40,11 @@ class DitTimeEmbd(nn.Module):
      self.max_freq = config.max_freq
      self.dim = config.freq_dim
      self.flip_sin_to_cos = config.flip_sin_to_cos
-     self.dropout_prob = config.label_drop_prob
+     self.label_dropout_prob = config.label_drop_prob
 
   def label_embedding(self, labels):
       if self.training:
-         drop_ids = torch.rand(labels.size(0), device=labels.device) < self.dropout_prob
+         drop_ids = torch.rand(labels.size(0), device=labels.device) < self.label_dropout_prob
          labels = torch.where(drop_ids, 0, labels)
       labels = self.label_embd(labels)
       return labels
@@ -75,9 +75,11 @@ class DitTimeEmbd(nn.Module):
 
 
 class DitAttention(nn.Module):
-  def __init__(self, config):
+  def __init__(self, config:DitConfig):
       super(DitAttention, self).__init__()
-      self.wqkv = nn.Linear(config.hidden_dim, 3 * config.hidden_dim, config.qkv_bias)
+      self.q_proj = nn.Linear(config.hidden_dim, config.hidden_dim, config.qkv_bias)
+      self.k_proj = nn.Linear(config.hidden_dim, config.hidden_dim, config.qkv_bias)
+      self.v_proj = nn.Linear(config.hidden_dim, config.hidden_dim, config.qkv_bias)
       self.wo = nn.Linear(config.hidden_dim, config.hidden_dim, config.qkv_bias)
       self.num_heads = config.num_heads
       self.head_dim = config.hidden_dim // self.num_heads
@@ -86,8 +88,9 @@ class DitAttention(nn.Module):
 
   def forward(self, hidden_states):
       bs = hidden_states.size(0)
-      qkv = self.wqkv(hidden_states)
-      q, k, v = torch.chunk(qkv, 3, dim=-1)
+      q = self.q_proj(hidden_states)
+      k = self.k_proj(hidden_states)
+      v = self.v_proj(hidden_states)
       q = q.view(bs, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
       k = k.view(bs, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
       v = v.view(bs, -1, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -102,7 +105,7 @@ class DitAttention(nn.Module):
 class PatchEmbed(nn.Module):
     def __init__(
         self,
-        config
+        config:DitConfig
     ):
         super().__init__()
         img_size = config.img_size
@@ -124,7 +127,7 @@ def modulate(hidden, scale, shift):
 
 
 class AdaNorm(nn.Module):
-  def __init__(self, config):
+  def __init__(self, config:DitConfig):
      super(AdaNorm, self).__init__()
      self.norm = nn.LayerNorm(config.hidden_dim, 1e-6, False)
      self.proj = nn.Sequential(nn.SiLU(), nn.Linear(config.hidden_dim, 6 * config.hidden_dim))
@@ -132,12 +135,12 @@ class AdaNorm(nn.Module):
   def forward(self, hidden_states, cond):
       emb = self.proj(cond)
       shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
-      hidden_states = self.norm(hidden_states) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+      hidden_states = modulate(self.norm(hidden_states), scale_msa, shift_msa)
       return hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
 
 class DitBlock(nn.Module):
-  def __init__(self, config):
+  def __init__(self, config: DitConfig):
       super(DitBlock, self).__init__()
       self.norm1 = AdaNorm(config)
       self.norm2 = nn.LayerNorm(config.hidden_dim, 1e-6, False)
@@ -204,10 +207,10 @@ class DitModel(nn.Module):
                     nn.init.constant_(module.bias, 0)
       self.apply(_basic_init)
 
-  def forward(self, x, t, labels=None):
+  def forward(self, x, t, cond=None):
       x = self.patch_embd(x)
       x = x + self.pos_embd
-      c = self.time_embd(t, labels)
+      c = self.time_embd(t, cond)
       for blc in self.blocks:
         x = blc(x, c)
       x = self.finalize(x, c)

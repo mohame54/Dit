@@ -1,118 +1,224 @@
-import pandas as pd
-import torch
 import os
+import copy
 import time
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
-from model import get_model
-from diffusers.models import AutoencoderKL
-from train_utils import train_epoch, val_epoch, create_opt
-from utils import get_dataloader_ddp, load_json
-from Diffusion import DiffusionPipeline
-
-
-assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
-init_process_group(backend='nccl')
-ddp_rank = int(os.environ['RANK'])
-ddp_local_rank = int(os.environ['LOCAL_RANK'])
-ddp_world_size = int(os.environ['WORLD_SIZE'])
-device = f'cuda:{ddp_local_rank}'
-torch.cuda.set_device(device)
-master_process = ddp_rank == 0
-vars = load_json("config.json", env_vars=True)
-EPOCHS = os.environ['EPOCHS']
-CUR_EPOCH = os.environ['CUR_EPOCH']
-EPOCHS_LOGS = os.environ['EPOCHS_LOGS']
-ACCUM_STEPS =  os.environ['ACCUM_STEPS']
-RANDOM_CFG =  os.environ['RANDOM_CFG']
-USE_ADMW =  os.environ['USE_ADMW']
-LOAD_WEIGHTS =  os.environ['LOAD_WEIGHTS']
-LOSS_TYPE =  os.environ['LOSS_TYPE'] 
-GLOBAL_TRAIN_BATCH_SIZE =  os.environ['GLOBAL_TRAIN_BATCH_SIZE']
-TRAIN_BATCH_SIZE = GLOBAL_TRAIN_BATCH_SIZE // ddp_world_size
-VAL_BATCH_SIZE = os.environ['VAL_BATCH_SIZE']
-PATH_TO_SAVE = os.environ['PATH_TO_SAVE']
-
-dd = {
-    "cane": "dog",
-    "cavallo": "horse",
-    "elefante": "elephant",
-    "farfalla": "butterfly",
-    "gallina": "chicken",
-    "gatto": "cat",
-    "mucca": "cow",
-    "pecora": "sheep",
-    "scoiattolo": "squirrel",
-    "ragno":"spider",
-}
-rev_dd = {v: k for k, v in dd.items()}
-label2id = dict(zip(dd.values(), range(len(dd))))
-
-train_df= pd.read_csv("content/data/train.csv")
-val_df = pd.read_csv("content/data/val.csv")
-train_df['all_path'] = train_df['path'].apply(lambda x: os.path.join("content", x))
-val_df['all_path'] = val_df['path'].apply(lambda x: os.path.join("content", x))
-train_loader = get_dataloader_ddp(train_df, ddp_rank, ddp_world_size, batch_size=TRAIN_BATCH_SIZE)
-val_loader = get_dataloader_ddp(val_df, ddp_rank, ddp_world_size, batch_size=VAL_BATCH_SIZE, shuffle=False, val=False)
-diff_net = get_model(num_classes=len(label2id), patch_size=2).to(device)
-vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix")
-vae.eval()
-for p in vae.parameters():
-    p.requires_grad = False
-
-if USE_ADMW:
-    optim = create_opt(diff_net, lr=5e-5)
-else:
-    optim = torch.optim.AdamW(diff_net.parameters(), lr=5e-5)
-
-
-diff_net = DDP(diff_net, device_ids=[ddp_local_rank])
-Model = DiffusionPipeline(
-    main_net=diff_net,
-    vae_net=vae,
-    input_res=(32, 32),
-    noise_schedule_name="cosv2",
-    label_dict=label2id,
+import torch
+import argparse
+import pandas as pd
+from torch.distributed import init_process_group, destroy_process_group, barrier
+from train_utils import train_epoch, val_epoch
+from utils import (
+    get_vae,
+    load_data_loader_ddp,
+    load_json,
+    CifarDataset,
+    upload_file_paths_to_hf,
+    images_to_grid
 )
+from Diffusion import RFDiffusion
+from fsdp_utils import ( 
+    load_fsdp_model,
+    load_optimizer_state_fsdp,
+    save_model_fsdp,
+    save_optimizer_fsdp
+)
+from opt import DualOpt
 
 
-scaler = torch.amp.GradScaler()
+def main(args):
+    assert torch.cuda.is_available(), "for now i think we need CUDA for FSDP"
+    ddp_rank = int(os.environ['RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = torch.device(f'cuda:{ddp_rank}')
+    master_process = ddp_rank == 0
+    torch.cuda.set_device(device)
+    init_process_group(backend='nccl', device_id=device)
+
+    # Synchronize after process group initialization
+    barrier()
+
+    train_df = pd.read_csv(os.path.join(args.data_dir_path, "train.csv"))
+    val_df = pd.read_csv(os.path.join(args.data_dir_path, "val.csv"))
+    images_dir_pth = os.path.join(args.data_dir_path, "images")
+    train_ds = CifarDataset(train_df, base_imgs_path=images_dir_pth, val=False)
+    val_ds = CifarDataset(val_df, base_imgs_path=images_dir_pth, val=False)
+
+    train_loader = load_data_loader_ddp(train_ds, ddp_world_size, ddp_rank, batch_size=args.train_batch_sz, shuffle=True)
+    val_loader = load_data_loader_ddp(val_ds, ddp_world_size, ddp_rank, batch_size=args.val_batch_sz, shuffle=False)
+
+    use_mp = args.mp_dt.lower() != "none"
+    mp_dtype = None
+    if use_mp:
+        mp_dtype = getattr(torch, args.mp_dt)
+    
+    weights_dir_path = args.weights_dir_path if args.weights_dir_path != "" else None
+    weights_path = None
+    ema_path = None
+    opt_path = None
+    if weights_dir_path is not None:
+        weights_path = os.path.join(weights_dir_path, "model.pt")
+        ema_path = os.path.join(weights_dir_path, "ema.pt")
+        opt_path = os.path.join(weights_dir_path, "optim.pt")
+
+    vae = None
+    if master_process:
+        vae = get_vae(rank=ddp_rank)
+        vae.eval()
+        for p in vae.parameters():
+            p.requires_grad = False
+    
+    # Load model first
+    diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
+    if ema_path is not None and os.path.exists(ema_path):
+        ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
+    else:
+        ema_net = copy.deepcopy(diff_net)
+    
+    for p in ema_net.parameters():
+        p.requires_grad = False
+
+    barrier()
+    
+    # Create optimizer AFTER diff_net is defined
+    opt_config = load_json("opt_config.json")
+    if args.use_moun:
+        optim = DualOpt(diff_net, lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
+    else:
+        optim = torch.optim.AdamW(diff_net.parameters(), lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
+   
+    if opt_path is not None and os.path.exists(opt_path):
+        load_optimizer_state_fsdp(optim, opt_path)
+    
+    barrier()
+    
+    rf_sch_config = load_json("rc_sch_config.json")
+    diff = RFDiffusion(
+        model=diff_net,
+        sigma=rf_sch_config['sigma'],
+        mu=rf_sch_config['mu'],
+        n_steps=rf_sch_config['sample_steps'],
+        sampler_dist=rf_sch_config['sampler_dist'],
+        sampling_method=rf_sch_config['sampling_method'],
+        vae=vae,
+        device=device
+    )
+
+    logs_save_dir = args.logs_save_dir
+    save_dir_path = args.dir_path_save
+    
+    if master_process:
+        os.makedirs(save_dir_path, exist_ok=True)
+        os.makedirs(logs_save_dir, exist_ok=True)
+    
+    barrier()
+    
+    train_logs_path = os.path.join(logs_save_dir, "train_logs.txt")
+    val_logs_path = os.path.join(logs_save_dir, "val_logs.txt")
+    
+    torch.cuda.empty_cache()
+    
+    for e in range(args.cur_epochs, args.epochs):
+        st = time.time()
+        if master_process:
+            print(f"Started Training on: {e+1} / {args.epochs} epoch")
+        
+        # Training phase - all GPUs participate
+        train_losses = train_epoch(diff, train_loader, optim, ddp_rank, 1.0, ema_net, args.loss_type)
+        
+        barrier()
+        torch.cuda.empty_cache()
+        
+        val_losses = val_epoch(diff, val_loader, ddp_rank, args.loss_type)
+        
+        barrier()
+        
+        if master_process:
+            print(f"Epoch {e + 1} completed in {time.time() - st:.2f} seconds")
+            
+            # Log validation losses
+            with open(val_logs_path, "a") as f:
+                for val_loss in val_losses:
+                    f.write(f"{val_loss:.6f}\n")
+
+            # Log training losses
+            with open(train_logs_path, "a") as f:
+                for train_loss in train_losses:
+                    f.write(f"{train_loss:.6f}\n")
+        
+        # Checkpoint saving
+        if (e + 1) % args.epoch_save_freq == 0:
+            # Synchronize before saving
+            barrier()
+            
+            if master_process:
+                dir_path = os.path.join(args.dir_path_save, f"checkpoint_{e+1}")
+                os.makedirs(dir_path, exist_ok=True)
+                
+                opt_path = os.path.join(dir_path, "optim.pt")
+                ema_path = os.path.join(dir_path, "ema.pt")
+                weights_path = os.path.join(dir_path, "model.pt")
+                samples_eps_path = os.path.join(dir_path, "samples.png")
+                samples_ema_path = os.path.join(dir_path, "ema_sample.png")
+                
+                print(f"Saving checkpoint at epoch {e+1}...")
+                save_model_fsdp(diff_net, weights_path)
+                save_model_fsdp(ema_net, ema_path)
+                save_optimizer_fsdp(optim, opt_path)
+                
+                # Generate sample images
+                print(f"Generating sample images...")
+                try:
+                    samples = diff.generate(args.num_gen_steps, [0,1,2] * 2, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                    diff.set_model(ema_net)
+                    ema_samples = diff.generate(args.num_gen_steps, [0,1,2] * 2, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                    diff.set_model(diff_net)
+                    eps_grid = images_to_grid(samples, 3)
+                    ema_grid = images_to_grid(ema_samples, 3)
+                    eps_grid.save(samples_eps_path, format="PNG")
+                    ema_grid.save(samples_ema_path, format="PNG")
+                    print(f"Sample images")
+                except Exception as ex:
+                    print(f"Failed to generate samples: {ex}")
+                
+                if args.push_hub:
+                    print("Uploading to Hugging Face Hub...")
+                    upload_file_paths_to_hf([
+                        opt_path,
+                        ema_path,
+                        weights_path,
+                        samples_ema_path,
+                        samples_eps_path
+                    ])
+                
+                print(f"Checkpoint saved to {dir_path}")
+            
+            # Wait for master to finish saving
+            barrier()
+        
+        torch.cuda.empty_cache()
+        
+        if master_process:  
+            print("-" * 60 + "\n")
+        
+        barrier()
+    
+    barrier()
+    destroy_process_group()
 
 
-torch.cuda.empty_cache()
-for e in range(CUR_EPOCH, EPOCHS):
-  st = time.time()
-  if master_process:
-    print(f"Started Training on: {e+1} / {EPOCHS}")
-  train_loss = train_epoch(
-                  Model,
-                  train_loader,
-                  optim,
-                  rank=ddp_rank,
-                  scaler=scaler,
-                  loss_type=LOSS_TYPE,
-                  max_norm=1.0,
-                  update_emma=True,
-                  grad_accum_steps=ACCUM_STEPS,
-                  random_cfg=RANDOM_CFG)
-  torch.cuda.empty_cache()
-  if master_process:
-      val_loss = val_epoch(
-                    Model,
-                    val_loader,
-                    rank = ddp_rank,
-                    loss_type=LOSS_TYPE,
-                    random_cfg=RANDOM_CFG,
-                 )
-      with open("train_logs.txt", "a") as f:
-            f.write(f"epoch:{e + 1} | train loss: {train_loss:.6f}| val loss:{val_loss:.6f}\n")
- 
-  if (e +1) % EPOCHS_LOGS  == 0  and master_process:
-      os.makedirs(PATH_TO_SAVE, exist_ok=True)
-      torch.save({"model":Model.eps_net.module.state_dict(), "optim":optim.state_dict()}, f"{PATH_TO_SAVE}/ddim_state.pt")
-      torch.save({"model":Model.ema_net.module.state_dict()},f"{PATH_TO_SAVE}/ddim_emma.pt")
-      
-  torch.cuda.empty_cache()
-  if master_process:  
-    print("-" * 60 + "\n")
-destroy_process_group()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mp-dt", type=str, default="float16")  
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--cur-epochs", type=int, default=0) 
+    parser.add_argument("--train-batch-sz", type=int, default=128)
+    parser.add_argument("--val-batch-sz", type=int, default=16) 
+    parser.add_argument("--use-moun", type=bool, default=True)
+    parser.add_argument("--loss-type", type=str, default="mse_loss")
+    parser.add_argument("--weights-dir-path", type=str, default="")
+    parser.add_argument("--dir-path-save", type=str, default="checkpoints")
+    parser.add_argument("--epoch-save-freq", type=int, default=20)
+    parser.add_argument("--logs-save-dir", type=str, default="logs")
+    parser.add_argument("--data-dir-path", type=str, default="data")
+    parser.add_argument("--push-hub", type=bool, default=True)
+    parser.add_argument("--num-gen-steps", type=int, default=64, help="Number of sample images to generate")
+    main(parser.parse_args())

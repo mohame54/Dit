@@ -1,0 +1,7 @@
+{
+    "sigma":1.0,
+    "mu":0.0,
+    "sample_steps":1000,
+    "sampler_dist":"logit_normal",
+    "sampling_method":"rk"
+}

@@ -1,5 +1,5 @@
-import numpy as np
 import torch
+from torch.utils.data import DataLoader, DistributedSampler
 from diffusers.models import AutoencoderKL
 from torch.utils.data import Dataset
 from torchvision import transforms as T
@@ -7,77 +7,62 @@ import PIL.Image as Image
 import numpy as np
 from typing import Sequence, Optional
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import json
-import random
 import os
+from PIL import Image
+from huggingface_hub import HfApi
+from huggingface_hub.hf_api import HfFolder
 
 
-class DataLoaderLite:
-    def __init__(
-        self,
-        ds,
-        batch_size,
-        process_rank,
-        num_processes,
-        shuffle=False,
-    ):
-        self.batch_size = batch_size
-        self.process_rank = process_rank
-        self.num_processes = num_processes  
-        self.data = ds 
-        self.shuffle = shuffle
-        self.reset()
+def load_hf_api():
+   HfFolder.save_token(os.getenv("HF_TOKEN"))
+   return HfApi()
 
-    def __len__(self):
-        total_batches = len(self.data) // self.batch_size
-        return (total_batches + self.num_processes - 1) // self.num_processes  
-    
-    def reset(self):
-        self.data_indices = list(range(len(self.data)))
-        if self.shuffle:
-            random.shuffle (self.data_indices)
-
-    def __getitem__(self, idx):
-        global_idx = idx * self.num_processes + self.process_rank
-        start_idx = global_idx * self.batch_size
-        end_idx = min(start_idx + self.batch_size, len(self.data))
-
-        if start_idx >= len(self.data):
-            raise IndexError("Index out of range")
-
-        imgs, labels = [], []
-        for data_idx in self.data_indices[start_idx: end_idx]:
-            img, label = self.data[data_idx]
-            imgs.append(img)
-            labels.append(torch.tensor(label))
-
-        if end_idx >= len(self.data):
-           # if the epoch ends we should reshuffle the data
-           self.reset()     
-        
-        return torch.stack(imgs), torch.stack(labels)
-
+def upload_file_paths_to_hf(pathes):
+    api = load_hf_api()
+    for pth in pathes:
+         api.upload_file(
+            path_or_fileobj= pth,
+            path_in_repo =pth,
+            repo_id="Muhammed164/Dit",
+            repo_type="model"
+        )
 
 class CifarDataset(Dataset):
-  def __init__(self, data_df, val=False):
+  def __init__(self, data_df, base_imgs_path="", val=False, img_sz=(256,256)):
       self.data_df = data_df
       self.val = val
-      self.val_transform = T.ToTensor()
+      if val:
+        self.val_transform = T.ToTensor()
+      self.img_sz = img_sz
+      self.base_imgs_path = base_imgs_path
+
   def __len__(self):
       return len(self.data_df)
 
   def __getitem__(self, idx):
-      data = "all_path"
+      data = "name"
       img_path , label = self.data_df.iloc[idx][[data,"classes"]]
+      img_path = os.path.join(self.base_imgs_path, img_path)
       if self.val:
-         img = Image.open(img_path).convert("RGB").resize((256, 256), resample=Image.LANCZOS)
+         img = Image.open(img_path).convert("RGB").resize(self.img_sz, resample=Image.LANCZOS)
          img = self.val_transform(img)
       else:
         img = np.load(img_path) * 0.18215
         img = torch.from_numpy(img.squeeze())
       return img, label + 1
+
+
+def load_data_loader_ddp(dataset, world_size, rank,batch_size, shuffle=True, num_workers=2, pin_memory=True):
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=shuffle)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=pin_memory
+    )
 
 
 def get_vae(model_id=None, rank=0):
@@ -88,31 +73,42 @@ def get_vae(model_id=None, rank=0):
     return vae
 
 
-def get_dataloader_ddp(
-    df,
-    process_rank,
-    num_processes,
-    batch_size=64,
-    shuffle=True,
-    val=False,
-):
-    ds = CifarDataset(df, val)
-    return DataLoaderLite(
-        ds,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_processes=num_processes,
-        process_rank=process_rank
-    )
-
-def preprocess_image(image):
-    #w, h = image.size
-    #w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-    #image = image.resize((w, h), resample=Image.LANCZOS)
+def preprocess_image(image, resize=(256, 256)):
+    image = image.resize(resize, resample=Image.LANCZOS)
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
     return 2.0 * image - 1.0
+
+
+def images_to_grid(images, rows):
+    bs, C, H, W = images.shape
+    
+    cols = int(np.ceil(bs / rows))
+    
+    total_slots = rows * cols
+    
+    if bs < total_slots:
+        num_padding = total_slots - bs
+        padding = torch.ones(num_padding, C, H, W, dtype=images.dtype, device=images.device)
+        images = torch.cat([images, padding], dim=0)
+    
+    images = torch.clamp(images, 0.0, 1.0)
+    
+    images = (images * 255).to(torch.uint8)
+    
+    images = images.cpu().numpy()
+    
+    images = images.reshape(rows, cols, C, H, W)
+    
+    # (rows, cols, C, H, W) -> (rows, H, cols, W, C)
+    images = images.transpose(0, 3, 1, 4, 2)
+    
+    # Reshape to final grid: (rows * H, cols * W, C)
+    grid_height = rows * H
+    grid_width = cols * W
+    images = images.reshape(grid_height, grid_width, C)
+    return Image.fromarray(images)
 
 
 def scale_latent(latent):
