@@ -1,5 +1,4 @@
 import os
-import copy
 import time
 import torch
 import argparse
@@ -38,7 +37,8 @@ def main(args):
 
     train_df = pd.read_csv(os.path.join(args.data_dir_path, "train.csv"))
     val_df = pd.read_csv(os.path.join(args.data_dir_path, "val.csv"))
-    images_dir_pth = os.path.join(args.data_dir_path, "images")
+    images_dir_pth = args.data_dir_path
+    
     train_ds = CifarDataset(train_df, base_imgs_path=images_dir_pth, val=False)
     val_ds = CifarDataset(val_df, base_imgs_path=images_dir_pth, val=False)
 
@@ -68,10 +68,16 @@ def main(args):
     
     # Load model first
     diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
+    
+    # Create EMA model - FSDP doesn't support deepcopy, so we create a new instance
     if ema_path is not None and os.path.exists(ema_path):
         ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
     else:
-        ema_net = copy.deepcopy(diff_net)
+        # Create a new FSDP model and copy the state dict from diff_net
+        ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None)
+        with torch.no_grad():
+            ema_state = diff_net.state_dict()
+            ema_net.load_state_dict(ema_state, assign=True)
     
     for p in ema_net.parameters():
         p.requires_grad = False
