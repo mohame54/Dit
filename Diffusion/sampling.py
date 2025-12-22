@@ -39,7 +39,7 @@ class RFDiffusion(ODSolversMixin):
         mu=0.0,
         sampler_dist="logit_normal",
         sampling_method="rk"
-        ):
+    ):
         super(RFDiffusion, self).__init__()
         self.model = model
         self.vae = vae
@@ -139,19 +139,19 @@ class RFDiffusion(ODSolversMixin):
             cond_tensor = cond
             x_t_inp = x_t
             t_inp = t
-            if cfg_fac > 0.0:
+            if cfg_fac > 0.0 and cond is not None:
                cond_tensor = torch.cat([null_labels, cond])
                x_t_inp = torch.cat([x_t] * 2)
                t_inp = torch.cat([t]* 2)
                
             out = self.model(x_t_inp, t_inp, cond=cond_tensor)
 
-            if cfg_fac > 0.0:
+            if cfg_fac > 0.0 and cond is not None:
                out_uncond, out_cond = out.chunk(2)
                out = out_uncond + cfg_fac * (out_cond - out_uncond)
             return out
            
-        for i in range(steps):
+        for i in range(steps - 1):  # Stop one step before to avoid index error
             t = t_vals[i]
             t_batch = torch.full((x.shape[0],), fill_value=t, device=device)
             t_batch = self.to_t_inds(t_batch)
@@ -183,8 +183,11 @@ class RFDiffusion(ODSolversMixin):
         label_dict: dict = LABEL_DICT,
         return_trj: bool = True     
     ):
-        if isinstance(labels[0], str):
+        if len(labels) > 0 and isinstance(labels[0], str):
             labels = [label_dict[l] + 1 for l in labels]
+        elif len(labels) > 0 and isinstance(labels[0], int):
+            # Labels are already integers, use as-is
+            labels = list(labels)
         labels_tensor = torch.tensor(labels, dtype=torch.int32, device=device)
         batch_size = labels_tensor.shape[0]
         shape = (batch_size, ) + latent_shape
@@ -211,6 +214,7 @@ class RFDiffusion(ODSolversMixin):
         samples = samples.cpu()
         # normalize to [0,1]
         samples = samples * 0.5 + 0.5
+        samples = samples.clamp(0.0, 1.0)
         torch.cuda.empty_cache()
         if return_trj:
             return samples[:batch_size], samples[batch_size:]

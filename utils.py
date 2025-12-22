@@ -42,9 +42,10 @@ class CifarDataset(Dataset):
       return len(self.data_df)
 
   def __getitem__(self, idx):
-      data = "name"
-      img_path , label = self.data_df.iloc[idx][[data,"classes"]]
-      img_path = os.path.join(self.base_imgs_path, img_path)
+      data = "latent_vector_path"
+      img_path , label = self.data_df.iloc[idx][[data,"label"]]
+      if img_path:
+         img_path = os.path.join(self.base_imgs_path, img_path)
       if self.val:
          img = Image.open(img_path).convert("RGB").resize(self.img_sz, resample=Image.LANCZOS)
          img = self.val_transform(img)

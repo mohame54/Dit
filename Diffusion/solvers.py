@@ -20,6 +20,7 @@ class ODSolversMixin:
         x: torch.Tensor,
         dt: float,
         model_output: torch.Tensor,
+        t_1,
         t_2,
         model_fn,
     ) -> torch.Tensor:

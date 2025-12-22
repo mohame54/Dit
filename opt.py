@@ -110,14 +110,14 @@ class DualOpt:
             self.moun.step()
         try:
             if self.adam_param_num > 0:
-               self.embed_opt.step(closure=closure)
+               self.adam.step(closure=closure)
         except TypeError:
-            self.embed_opt.step()
+            self.adam.step()
 
     def state_dict(self) -> Dict[str, Any]:
         return {
             "moun": self.moun.state_dict(),
-            "adam": self.embed_opt.state_dict(),
+            "adam": self.adam.state_dict(),
             "step": self._step_counter
         }
 
@@ -126,16 +126,16 @@ class DualOpt:
             self.moun.load_state_dict(state["moun"])
 
         if "adam" in state:
-            self.embed_opt.load_state_dict(state["embed"])
+            self.adam.load_state_dict(state["adam"])
 
         if "step" in state:
             self._step_counter = state["step"]
 
     def param_groups(self) -> Tuple[List[Dict], List[Dict]]:
-        return self.moun.param_groups, self.embed_opt.param_groups
+        return self.moun.param_groups, self.adam.param_groups
 
     def add_param_group_to_moun(self, group):
         self.moun.add_param_group(group)
 
     def add_param_group_to_embed(self, group):
-        self.embed_opt.add_param_group(group)
+        self.adam.add_param_group(group)

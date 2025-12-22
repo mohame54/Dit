@@ -11,7 +11,7 @@ class DitConfig:
       num_blocks:int = 12
       bias: bool = True
       qkv_bias:bool = False
-      num_classes:int = 2
+      num_classes:int = 3  # bird, cat, dog
       tim_mlp_dim: int = 1
       max_freq:int = 10000
       num_heads:int = 8

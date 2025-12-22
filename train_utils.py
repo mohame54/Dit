@@ -65,6 +65,9 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss"):
         
         loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
         
+        # Synchronize loss across all ranks
+        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        
         # All ranks compute, but only rank 0 logs
         if rank == 0:
             losses.append(loss.item())
