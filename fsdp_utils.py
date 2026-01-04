@@ -1,9 +1,14 @@
 import torch
 import functools
 from torch import nn
-from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy, StateDictType, FullStateDictConfig
+from torch.distributed.fsdp import (
+    MixedPrecision,
+    BackwardPrefetch,
+    ShardingStrategy,
+    FullStateDictConfig,
+    StateDictType,
+)
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.checkpoint.state_dict import _init_optim_state
@@ -155,7 +160,7 @@ def load_fsdp_model(use_mp, mp_dt, weights_path: str = None, sharding_strategy=S
     )
     
     if use_mp:
-        fsdp_kwargs["mixed_precision"] = MixedPrecisionPolicy(
+        fsdp_kwargs["mixed_precision"] = MixedPrecision(
             param_dtype=mp_dt,
             reduce_dtype=mp_dt,
             buffer_dtype=mp_dt,
