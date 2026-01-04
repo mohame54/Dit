@@ -166,6 +166,12 @@ def load_fsdp_model(use_mp, mp_dt, weights_path: str = None, sharding_strategy=S
         )
         
     model = get_model(**model_kwargs)
+    
+    # Cast model to target dtype BEFORE FSDP wrapping
+    # MixedPrecision policy doesn't auto-cast existing parameters
+    if use_mp:
+        model = model.to(dtype=mp_dt)
+    
     model = FSDP(model, **fsdp_kwargs)
     
     if weights_path:

@@ -33,6 +33,9 @@ def train_epoch(
             diff.model.set_requires_gradient_sync(not is_accumulating)
         
         loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
+        print(f"Loss dtype: {loss.dtype}")
+        print(f"Model param dtypes: {[p.dtype for p in diff.model.parameters()][:3]}")
+        print(f"Input dtype: {inputs.dtype}")
         loss = loss / grad_accum_steps  # Scale loss
         loss.backward()
         
