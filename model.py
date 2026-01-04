@@ -34,9 +34,9 @@ class DitTimeEmbd(nn.Module):
   def __init__(self, config: DitConfig):
      super(DitTimeEmbd, self).__init__()
      self.mlp = nn.Sequential(
-         nn.Linear(config.freq_dim, config.hidden_dim * config.tim_mlp_dim, config.bias),
+         nn.Linear(config.freq_dim, config.hidden_dim * config.tim_mlp_dim, bias=config.bias),
          nn.SiLU(),
-         nn.Linear(config.hidden_dim * config.tim_mlp_dim, config.hidden_dim, config.bias),
+         nn.Linear(config.hidden_dim * config.tim_mlp_dim, config.hidden_dim, bias=config.bias),
      )
      use_cfg = int(config.label_drop_prob > 0.0)
      self.label_embd = nn.Embedding(config.num_classes + use_cfg, config.hidden_dim)
@@ -56,9 +56,9 @@ class DitTimeEmbd(nn.Module):
   def get_positional_encoding(t, dim, max_freq=10000, flip_sin_to_cos=True):
       half = dim // 2
       freqs = torch.exp(
-          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=t.dtype) / half
+          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=torch.float32) / half
       ).to(device=t.device)
-      args = t[:, None] * freqs[None]
+      args = t[:, None].float() * freqs[None]
       embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
       if flip_sin_to_cos:
         half_dim = dim // 2
