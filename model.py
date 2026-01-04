@@ -68,8 +68,10 @@ class DitTimeEmbd(nn.Module):
       return embedding
 
   def forward(self, t, labels=None):
-      device = t.device
-      t = self.get_positional_encoding(t, self.dim, self.max_freq, self.flip_sin_to_cos).to(device)
+      t = self.get_positional_encoding(
+        t, self.dim, self.max_freq, self.flip_sin_to_cos)
+      # Cast to match the dtype of the model parameters (for mixed precision training)
+      t = t.to(dtype=self.mlp[0].weight.dtype)
       t = self.mlp(t)
       if labels is not None:
         labels = self.label_embedding(labels)
@@ -147,7 +149,7 @@ class DitMlp(nn.Module):
         super(DitMlp, self).__init__()
         mlp_dim = int(config.mlp_fac * config.hidden_dim)
         self.fc1 = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
-        self.fc2 = nn.Linear(config.mlp_dim, config.hidden_dim, bias=config.mlp_bias)
+        self.fc2 = nn.Linear(mlp_dim, config.hidden_dim, bias=config.mlp_bias)
         if config.use_gate_mlp:
             self.gate_mlp = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
         else:
