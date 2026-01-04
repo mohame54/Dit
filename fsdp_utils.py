@@ -132,7 +132,7 @@ def load_fsdp_model(use_mp, mp_dt, weights_path: str = None ,**model_kwargs):
     if use_mp:
         fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
             param_dtype=mp_dt,
-            reduce_dtype=torch.float32,
+            reduce_dtype=mp_dt,
         )
         
     model = get_model(**model_kwargs)

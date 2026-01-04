@@ -93,6 +93,7 @@ class RFDiffusion(ODSolversMixin):
         B = x0.shape[0]
         z = torch.randn_like(x0) * self.sigma
         t = self.sample_t(B, min_val=min_val, max_val=max_val, device=x0.device)  # (B,)
+        t = t.to(dtype=x0.dtype)  # Match dtype for mixed precision
         t_b = t.view(B, 1, 1, 1)
         x_t = (1.0 - t_b) * x0 + t_b * z  # linear path
         v_pred = self.model(x_t, self.to_t_inds(t), cond=cond)
