@@ -19,11 +19,9 @@ def train_epoch(
     losses = []
     loop = tqdm(train_ds, desc="Training") if rank == 0 else train_ds
     
-    # Get the model's parameter dtype for mixed precision training
-    model_dtype = next(diff.model.parameters()).dtype
     
     for i, (inputs, labels) in enumerate(loop):
-        inputs = inputs.to(rank, dtype=model_dtype, non_blocking=True)
+        inputs = inputs.to(rank, non_blocking=True)
         labels = labels.to(rank, non_blocking=True)
         
         is_accumulating = (i + 1) % grad_accum_steps != 0
@@ -65,11 +63,8 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss"):
     losses = []
     loop = tqdm(val_ds, desc="Validation") if rank == 0 else val_ds
     
-    # Get the model's parameter dtype for mixed precision training
-    model_dtype = next(diff.model.parameters()).dtype
-    
     for inputs, labels in loop:
-        inputs = inputs.to(rank, dtype=model_dtype, non_blocking=True)
+        inputs = inputs.to(rank, non_blocking=True)
         labels = labels.to(rank, non_blocking=True)
         
         loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)

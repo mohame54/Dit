@@ -161,8 +161,9 @@ def load_fsdp_model(use_mp, mp_dt, weights_path: str = None, sharding_strategy=S
     if use_mp:
         fsdp_kwargs["mixed_precision"] = MixedPrecision(
             param_dtype=mp_dt,
-            reduce_dtype=torch.float32,  # Keep reductions in fp32 for stability
+            reduce_dtype=mp_dt,  # Keep reductions in fp32 for stability
             buffer_dtype=mp_dt,
+            cast_model_outputs=True,
         )
         
     model = get_model(**model_kwargs)
