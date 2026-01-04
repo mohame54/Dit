@@ -85,7 +85,7 @@ def main(args):
     barrier()
     
     # Create optimizer AFTER diff_net is defined
-    opt_config = load_json("opt_config.json")
+    opt_config = load_json("opt_config.json", env_vars=False)
     if args.use_moun:
         optim = DualOpt(diff_net, lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
     else:
@@ -96,7 +96,7 @@ def main(args):
     
     barrier()
     
-    rf_sch_config = load_json("rc_sch_config.json")
+    rf_sch_config = load_json("rc_sch_config.json", env_vars=False)
     diff = RFDiffusion(
         model=diff_net,
         sigma=rf_sch_config['sigma'],

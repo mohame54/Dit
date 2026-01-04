@@ -23,6 +23,8 @@ class DitConfig:
       drop_rate:float = 0.2
       add_conv_final: bool = False
       add_norm_embd: bool = False
+      use_gate_mlp: bool = True
+      mlp_bias: bool = False
       flip_sin_to_cos: bool = True
       label_drop_prob: float = 0.1
 
@@ -139,19 +141,35 @@ class AdaNorm(nn.Module):
       return hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
 
+class DitMlp(nn.Module):
+    def __init__(self, config: DitConfig):
+        super(DitMlp, self).__init__()
+        mlp_dim = int(config.mlp_fac * config.hidden_dim)
+        self.fc1 = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
+        self.fc2 = nn.Linear(config.mlp_dim, config.hidden_dim, bias=config.mlp_bias)
+        if self.use_gate_mlp:
+            self.gate_mlp = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
+        else:
+            self.gate = None
+        self.act = nn.SiLU()
+    
+    def gate(self, x):
+        if self.use_gate_mlp:
+            return self.gate_mlp(x)
+        else:
+            return 1.0
+    def forward(self, x):
+        return self.fc2(self.act(self.fc1(x) * self.gate(x)))
+
 class DitBlock(nn.Module):
   def __init__(self, config: DitConfig):
       super(DitBlock, self).__init__()
       self.norm1 = AdaNorm(config)
       self.norm2 = nn.LayerNorm(config.hidden_dim, 1e-6, False)
-      mlp_dim = int(config.mlp_fac * config.hidden_dim)
+    
       self.attn = DitAttention(config)
-      self.mlp = nn.Sequential(
-          nn.Linear(config.hidden_dim, mlp_dim),
-          nn.SiLU(),
-          nn.Dropout(config.drop_rate),
-          nn.Linear(mlp_dim, config.hidden_dim)
-      )
+      self.mlp = DitMlp(config)
+      
   def forward(self, hidden_states, c):
       norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, c)
       attn_output = self.attn(norm_hidden_states)
