@@ -56,9 +56,9 @@ class DitTimeEmbd(nn.Module):
   def get_positional_encoding(t, dim, max_freq=10000, flip_sin_to_cos=True):
       half = dim // 2
       freqs = torch.exp(
-          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=t.dtype) / half
       ).to(device=t.device)
-      args = t[:, None].float() * freqs[None]
+      args = t[:, None] * freqs[None]
       embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
       if flip_sin_to_cos:
         half_dim = dim // 2
@@ -148,7 +148,7 @@ class DitMlp(nn.Module):
         mlp_dim = int(config.mlp_fac * config.hidden_dim)
         self.fc1 = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
         self.fc2 = nn.Linear(config.mlp_dim, config.hidden_dim, bias=config.mlp_bias)
-        if self.use_gate_mlp:
+        if config.use_gate_mlp:
             self.gate_mlp = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
         else:
             self.gate_mlp = None
