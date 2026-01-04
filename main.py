@@ -3,7 +3,7 @@ import time
 import torch
 import argparse
 import pandas as pd
-from torch.distributed import init_process_group, destroy_process_group, barrier
+from torch.distributed import init_process_group, destroy_process_group, barrier, broadcast
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from train_utils import train_epoch, val_epoch
 from utils import (
@@ -196,11 +196,17 @@ def main(args):
                 for train_loss in train_losses:
                     f.write(f"{train_loss:.6f}\n")
         
+        # Synchronize is_best flag across all ranks to avoid deadlock
+        is_best_tensor = torch.tensor([1.0 if is_best else 0.0], device=device)
+        broadcast(is_best_tensor, src=0)
+        is_best = bool(is_best_tensor.item())
+        
         # Checkpoint saving - all ranks need to participate in FSDP state collection
         should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
         
         if should_save:
             # Synchronize before saving
+            print(f"Saving checkpoint at epoch {e+1}...")
             barrier()
             
             # Create directory on master process
@@ -315,6 +321,6 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler-gamma", type=float, default=0.5, help="Gamma for StepLR scheduler")
     
     # Checkpoint saving
-    parser.add_argument("--save-best", type=str_to_bool, default=True, help="Save checkpoint when achieving best validation loss")
+    parser.add_argument("--save-best", type=str_to_bool, default=False, help="Save checkpoint when achieving best validation loss")
     
     main(parser.parse_args())

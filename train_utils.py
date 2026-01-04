@@ -2,6 +2,7 @@ from tqdm import tqdm
 from Diffusion import RFDiffusion
 import torch.distributed as dist
 import torch
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 
 
 def train_epoch(
@@ -14,34 +15,36 @@ def train_epoch(
     loss_type="mse_loss",
     ema_decay=0.999,
     grad_accum_steps=1,
+    mp_dtype=torch.float16,
 ):
     diff.model.train()
     losses = []
     loop = tqdm(train_ds, desc="Training") if rank == 0 else train_ds
     
-    
+    scaler = ShardedGradScaler()
     for i, (inputs, labels) in enumerate(loop):
-        inputs = inputs.to(rank, non_blocking=True)
-        labels = labels.to(rank, non_blocking=True)
-        
-        is_accumulating = (i + 1) % grad_accum_steps != 0
-        
-        # Control gradient sync for FSDP2
-        if hasattr(diff.model, 'set_requires_gradient_sync'):
-            diff.model.set_requires_gradient_sync(not is_accumulating)
-        
-        loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
-        print(f"Loss dtype: {loss.dtype}")
-        print(f"Model param dtypes: {[p.dtype for p in diff.model.parameters()][:3]}")
-        print(f"Input dtype: {inputs.dtype}")
-        loss = loss / grad_accum_steps  # Scale loss
-        loss.backward()
+        with torch.amp.autocast(device_type="cuda",dtype=mp_dtype):
+            inputs = inputs.to(rank, non_blocking=True)
+            labels = labels.to(rank, non_blocking=True)
+            
+            is_accumulating = (i + 1) % grad_accum_steps != 0
+            
+            # Control gradient sync for FSDP2
+            if hasattr(diff.model, 'set_requires_gradient_sync'):
+                diff.model.set_requires_gradient_sync(not is_accumulating)
+            
+            loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
+            loss = loss / grad_accum_steps  # Scale loss
+
+        scaler.scale(loss).backward()
         
         if not is_accumulating:
             if max_norm is not None:
+                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(diff.model.parameters(), max_norm)
             
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             opt.zero_grad(set_to_none=True)
             
             if ema_model is not None:
@@ -64,6 +67,7 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss"):
     loop = tqdm(val_ds, desc="Validation") if rank == 0 else val_ds
     
     for inputs, labels in loop:
+        
         inputs = inputs.to(rank, non_blocking=True)
         labels = labels.to(rank, non_blocking=True)
         
