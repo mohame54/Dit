@@ -75,8 +75,8 @@ class RFDiffusion(ODSolversMixin):
         self.model = model
 
     def to_t_inds(self, t: torch.Tensor):
-        t_inds = (t * float(self.n_steps)).to(torch.int32, device=t.device)
-        return t_inds
+        t_inds = (t * float(self.n_steps)).to(torch.int32)
+        return t_inds.to(t.device)
      
     def rectified_flow_loss(
         self,
