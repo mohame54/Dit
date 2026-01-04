@@ -151,14 +151,16 @@ class DitMlp(nn.Module):
         if self.use_gate_mlp:
             self.gate_mlp = nn.Linear(config.hidden_dim, mlp_dim, bias=config.mlp_bias)
         else:
-            self.gate = None
+            self.gate_mlp = None
         self.act = nn.SiLU()
+        self.use_gate_mlp = config.use_gate_mlp
     
     def gate(self, x):
         if self.use_gate_mlp:
             return self.gate_mlp(x)
         else:
             return 1.0
+
     def forward(self, x):
         return self.fc2(self.act(self.fc1(x) * self.gate(x)))
 
