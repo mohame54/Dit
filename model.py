@@ -233,7 +233,7 @@ class DitModel(nn.Module):
 
   def forward(self, x, t, cond=None):
       x = self.patch_embd(x)
-      x = x + self.pos_embd
+      x = x + self.pos_embd.to(x.dtype)
       c = self.time_embd(t, cond)
       for blc in self.blocks:
         x = blc(x, c)
