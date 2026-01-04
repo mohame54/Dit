@@ -25,6 +25,7 @@ class DitConfig:
       add_norm_embd: bool = False
       use_gate_mlp: bool = True
       mlp_bias: bool = False
+      mlp_dim: int = 2 * 768
       flip_sin_to_cos: bool = True
       label_drop_prob: float = 0.1
 
@@ -169,7 +170,7 @@ class DitBlock(nn.Module):
     
       self.attn = DitAttention(config)
       self.mlp = DitMlp(config)
-      
+
   def forward(self, hidden_states, c):
       norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, c)
       attn_output = self.attn(norm_hidden_states)
