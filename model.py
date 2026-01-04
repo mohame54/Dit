@@ -33,10 +33,11 @@ class DitConfig:
 class DitTimeEmbd(nn.Module):
   def __init__(self, config: DitConfig):
      super(DitTimeEmbd, self).__init__()
+     mlp_dim = config.hidden_dim * config.tim_mlp_dim
      self.mlp = nn.Sequential(
-         nn.Linear(config.freq_dim, config.hidden_dim * config.tim_mlp_dim, bias=config.bias),
+         nn.Linear(config.freq_dim, mlp_dim, bias=config.bias),
          nn.SiLU(),
-         nn.Linear(config.hidden_dim * config.tim_mlp_dim, config.hidden_dim, bias=config.bias),
+         nn.Linear(mlp_dim, config.hidden_dim, bias=config.bias),
      )
      use_cfg = int(config.label_drop_prob > 0.0)
      self.label_embd = nn.Embedding(config.num_classes + use_cfg, config.hidden_dim)
@@ -63,7 +64,7 @@ class DitTimeEmbd(nn.Module):
       if flip_sin_to_cos:
         half_dim = dim // 2
         embedding = torch.cat([embedding[:, half_dim:], embedding[:, :half_dim]], dim=-1)
-      if dim % 2 == 0:
+      if dim % 2 != 0:
           embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
       return embedding
 
