@@ -31,12 +31,13 @@ def cleanup():
 
 def main(args):
     assert torch.cuda.is_available(), "for now i think we need CUDA for FSDP"
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
     ddp_rank = int(os.environ['RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = torch.device(f'cuda:{ddp_rank}')
+    device = torch.device(f'cuda:{local_rank}')
     master_process = ddp_rank == 0
     torch.cuda.set_device(device)
-    init_process_group(backend='nccl', device_id=device)
+    init_process_group(backend='nccl')
 
     # Synchronize after process group initialization
     barrier()
@@ -67,7 +68,7 @@ def main(args):
 
     vae = None
     if master_process:
-        vae = get_vae(model_id=args.vae_model_id, rank=ddp_rank)
+        vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
         vae.eval()
         for p in vae.parameters():
             p.requires_grad = False
@@ -142,22 +143,24 @@ def main(args):
     
     for e in range(args.cur_epochs, args.epochs):
         st = time.time()
+        
+        # Set epoch for distributed sampler BEFORE starting the epoch
+        if hasattr(train_loader.sampler, 'set_epoch'):
+            train_loader.sampler.set_epoch(e)
+        
         if master_process:
             print(f"Started Training on: {e+1} / {args.epochs} epoch")
             if scheduler is not None:
                 print(f"Current LR: {scheduler.get_last_lr()[0]:.6e}")
         
-        # Set epoch for distributed sampler
-        train_loader.sampler.set_epoch(e)
-        
         # Training phase - all GPUs participate
-        train_losses = train_epoch(diff, train_loader, optim, ddp_rank, 1.0, ema_net, args.loss_type)
+        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type)
         
         barrier()
         torch.cuda.empty_cache()
         
         # Validation phase
-        val_losses = val_epoch(diff, val_loader, ddp_rank, args.loss_type)
+        val_losses = val_epoch(diff, val_loader, local_rank, args.loss_type)
         
         # Step the scheduler after validation
         if scheduler is not None:

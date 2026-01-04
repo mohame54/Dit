@@ -1,6 +1,5 @@
 import torch
 import functools
-from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import (
     MixedPrecision,
@@ -162,7 +161,7 @@ def load_fsdp_model(use_mp, mp_dt, weights_path: str = None, sharding_strategy=S
     if use_mp:
         fsdp_kwargs["mixed_precision"] = MixedPrecision(
             param_dtype=mp_dt,
-            reduce_dtype=mp_dt,
+            reduce_dtype=torch.float32,  # Keep reductions in fp32 for stability
             buffer_dtype=mp_dt,
         )
         

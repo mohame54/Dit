@@ -56,10 +56,14 @@ class DitTimeEmbd(nn.Module):
   @staticmethod
   def get_positional_encoding(t, dim, max_freq=10000, flip_sin_to_cos=True):
       half = dim // 2
+      # Use the dtype of the input tensor t
+      dtype = t.dtype if t.dtype.is_floating_point else torch.float32
       freqs = torch.exp(
-          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-      ).to(device=t.device)
-      args = t[:, None].float() * freqs[None]
+          -math.log(max_freq) * torch.arange(start=0, end=half, dtype=dtype, device=t.device) / half
+      )
+      # Convert t to float type matching the target dtype
+      t_float = t.to(dtype=dtype) if not t.dtype.is_floating_point else t
+      args = t_float[:, None] * freqs[None]
       embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
       if flip_sin_to_cos:
         half_dim = dim // 2
@@ -69,10 +73,15 @@ class DitTimeEmbd(nn.Module):
       return embedding
 
   def forward(self, t, labels=None):
+      # Get target dtype from model parameters
+      target_dtype = self.mlp[0].weight.dtype
+      # If t is integer, convert to target dtype for positional encoding
+      if not t.dtype.is_floating_point:
+          t = t.to(dtype=target_dtype)
       t = self.get_positional_encoding(
         t, self.dim, self.max_freq, self.flip_sin_to_cos)
-      # Cast to match the dtype of the model parameters (for mixed precision training)
-      t = t.to(dtype=self.mlp[0].weight.dtype)
+      # Ensure output matches model dtype
+      t = t.to(dtype=target_dtype)
       t = self.mlp(t)
       if labels is not None:
         labels = self.label_embedding(labels)
