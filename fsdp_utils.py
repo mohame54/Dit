@@ -1,24 +1,30 @@
 import torch
+import functools
 from torch import nn
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import MixedPrecisionPolicy
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import ShardingStrategy, StateDictType, FullStateDictConfig
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.checkpoint.state_dict import _init_optim_state
-from model import get_model
+from model import get_model, DitBlock
 from opt import DualOpt
 
 
 def save_model_fsdp(model, path):
-    sharded_sd = model.state_dict()
-    cpu_state_dict = {}
-    for param_name, sharded_param in sharded_sd.items():
-        full_param = sharded_param.full_tensor()
-        if torch.distributed.get_rank() == 0:
-            cpu_state_dict[param_name] = full_param.cpu()
-    torch.save(cpu_state_dict, path)
+    """Save FSDP model using official state_dict approach."""
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+        cpu_state = model.state_dict()
+    
+    if torch.distributed.get_rank() == 0:
+        torch.save(cpu_state, path)
 
 
 def save_optimizer_fsdp(opt, path):
+    """Save FSDP optimizer state."""
     is_rank_zero = torch.distributed.get_rank() == 0
+    
     def get_state(optimizer):
         sharded_sd = optimizer.state_dict()
         sharded_state = sharded_sd["state"]
@@ -39,9 +45,10 @@ def save_optimizer_fsdp(opt, path):
                 full_state[group_id] = group_state 
     
         return {
-                "param_groups": sharded_sd["param_groups"],
-                "state": full_state,
-            }
+            "param_groups": sharded_sd["param_groups"],
+            "state": full_state,
+        }
+    
     if isinstance(opt, DualOpt):
         state = {
             "moun": get_state(opt.moun),
@@ -50,7 +57,9 @@ def save_optimizer_fsdp(opt, path):
         }
     else:
         state = get_state(opt)
-    torch.save(state, path)
+    
+    if is_rank_zero:
+        torch.save(state, path)
 
 
 def load_optimizer_state_fsdp(opt, opt_state_path):
@@ -106,42 +115,56 @@ def load_optimizer_state_fsdp(opt, opt_state_path):
     else:
         opt.load_state_dict(load_opt_state(full_sd))
 
-    
-def _load_sharded_model(model, weights_path):
+def load_model_state_fsdp(model, weights_path):
+    """Load model state dict into FSDP model using official approach."""
     full_sd = torch.load(
-            weights_path,
-            mmap=True,
-            weights_only=True,
-            map_location='cpu',
+        weights_path,
+        mmap=True,
+        weights_only=True,
+        map_location='cpu',
     )
-    meta_sharded_sd = model.state_dict()
-    sharded_sd = {}
-    for param_name, full_tensor in full_sd.items():
-        sharded_meta_param = meta_sharded_sd.get(param_name)
-        sharded_tensor = distribute_tensor(
-            full_tensor,
-            sharded_meta_param.device_mesh,
-            sharded_meta_param.placements,
-        )
-        sharded_sd[param_name] = nn.Parameter(sharded_tensor)
-    model.load_state_dict(sharded_sd, assign=True)
+    
+    # Use official FSDP state dict loading
+    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
+        model.load_state_dict(full_sd)
 
 
-def load_fsdp_model(use_mp, mp_dt, weights_path: str = None ,**model_kwargs):
-    fsdp_kwargs = {}
+def load_fsdp_model(use_mp, mp_dt, weights_path: str = None, sharding_strategy=ShardingStrategy.FULL_SHARD, **model_kwargs):
+    """
+    Load FSDP model with auto-wrap policy and proper configuration.
+    
+    Args:
+        use_mp: Whether to use mixed precision
+        mp_dt: Mixed precision dtype
+        weights_path: Path to model weights
+        sharding_strategy: FSDP sharding strategy (FULL_SHARD for ZeRO-3, SHARD_GRAD_OP for ZeRO-2)
+        **model_kwargs: Additional model arguments
+    """
+    # Define auto-wrap policy for transformer blocks
+    dit_auto_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={
+            DitBlock,
+        },
+    )
+    
+    fsdp_kwargs = dict(
+        device_id=torch.cuda.current_device(),
+        auto_wrap_policy=dit_auto_wrap_policy,
+        sharding_strategy=sharding_strategy,
+    )
+    
     if use_mp:
-        fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
+        fsdp_kwargs["mixed_precision"] = MixedPrecisionPolicy(
             param_dtype=mp_dt,
             reduce_dtype=mp_dt,
+            buffer_dtype=mp_dt,
         )
         
     model = get_model(**model_kwargs)
-
-    for layer in model.blocks:
-        fully_shard(layer, **fsdp_kwargs)
-
-    fully_shard(model, **fsdp_kwargs)
+    model = FSDP(model, **fsdp_kwargs)
+    
     if weights_path:
-        _load_sharded_model(model, weights_path)
+        load_model_state_fsdp(model, weights_path)
    
     return model

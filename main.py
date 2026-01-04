@@ -4,6 +4,7 @@ import torch
 import argparse
 import pandas as pd
 from torch.distributed import init_process_group, destroy_process_group, barrier
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from train_utils import train_epoch, val_epoch
 from utils import (
     get_vae,
@@ -21,6 +22,11 @@ from fsdp_utils import (
     save_optimizer_fsdp
 )
 from opt import DualOpt
+
+
+def cleanup():
+    """Cleanup distributed training."""
+    destroy_process_group()
 
 
 def main(args):
@@ -94,6 +100,17 @@ def main(args):
     if opt_path is not None and os.path.exists(opt_path):
         load_optimizer_state_fsdp(optim, opt_path)
     
+    # Create learning rate scheduler
+    scheduler = None
+    if args.use_scheduler:
+        if args.scheduler_type == "cosine":
+            scheduler = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=opt_config.get('min_lr', 1e-6))
+        elif args.scheduler_type == "step":
+            scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma)
+        
+        if master_process:
+            print(f"Using {args.scheduler_type} scheduler")
+    
     barrier()
     
     rf_sch_config = load_json("rc_sch_config.json", env_vars=False)
@@ -121,10 +138,17 @@ def main(args):
     
     torch.cuda.empty_cache()
     
+    best_val_loss = float("inf")
+    
     for e in range(args.cur_epochs, args.epochs):
         st = time.time()
         if master_process:
             print(f"Started Training on: {e+1} / {args.epochs} epoch")
+            if scheduler is not None:
+                print(f"Current LR: {scheduler.get_last_lr()[0]:.6e}")
+        
+        # Set epoch for distributed sampler
+        train_loader.sampler.set_epoch(e)
         
         # Training phase - all GPUs participate
         train_losses = train_epoch(diff, train_loader, optim, ddp_rank, 1.0, ema_net, args.loss_type)
@@ -132,13 +156,32 @@ def main(args):
         barrier()
         torch.cuda.empty_cache()
         
-        
+        # Validation phase
         val_losses = val_epoch(diff, val_loader, ddp_rank, args.loss_type)
+        
+        # Step the scheduler after validation
+        if scheduler is not None:
+            scheduler.step()
         
         barrier()
         
+        # Calculate average losses
+        avg_val_loss = sum(val_losses) / len(val_losses) if val_losses else float("inf")
+        is_best = False
+        
         if master_process:
-            print(f"Epoch {e + 1} completed in {time.time() - st:.2f} seconds")
+            epoch_time = time.time() - st
+            avg_train_loss = sum(train_losses) / len(train_losses) if train_losses else 0
+            
+            print(f"Epoch {e + 1} completed in {epoch_time:.2f} seconds")
+            print(f"Average Train Loss: {avg_train_loss:.6f}")
+            print(f"Average Val Loss: {avg_val_loss:.6f}")
+            
+            # Track best validation loss
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                is_best = True
+                print(f">>>>>> New Best Val Loss: {best_val_loss:.6f}")
             
             # Log validation losses
             with open(val_logs_path, "a") as f:
@@ -150,8 +193,10 @@ def main(args):
                 for train_loss in train_losses:
                     f.write(f"{train_loss:.6f}\n")
         
-        # Checkpoint saving
-        if (e + 1) % args.epoch_save_freq == 0:
+        # Checkpoint saving - all ranks need to participate in FSDP state collection
+        should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
+        
+        if should_save:
             # Synchronize before saving
             barrier()
             
@@ -223,8 +268,12 @@ def main(args):
         
         barrier()
     
+    if master_process:
+        print("Training completed successfully!")
+        print(f"Best validation loss: {best_val_loss:.6f}")
+    
     barrier()
-    destroy_process_group()
+    cleanup()
 
 
 def str_to_bool(v):
@@ -255,4 +304,14 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir-path", type=str, default="data")
     parser.add_argument("--push-hub", type=str_to_bool, default=True)
     parser.add_argument("--num-gen-steps", type=int, default=64, help="Number of diffusion sampling steps")
+    
+    # Scheduler arguments
+    parser.add_argument("--use-scheduler", type=str_to_bool, default=True, help="Use learning rate scheduler")
+    parser.add_argument("--scheduler-type", type=str, default="cosine", choices=["cosine", "step"], help="Type of scheduler")
+    parser.add_argument("--scheduler-step-size", type=int, default=100, help="Step size for StepLR scheduler")
+    parser.add_argument("--scheduler-gamma", type=float, default=0.5, help="Gamma for StepLR scheduler")
+    
+    # Checkpoint saving
+    parser.add_argument("--save-best", type=str_to_bool, default=True, help="Save checkpoint when achieving best validation loss")
+    
     main(parser.parse_args())
