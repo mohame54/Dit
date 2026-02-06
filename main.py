@@ -206,7 +206,8 @@ def main(args):
         
         if should_save:
             # Synchronize before saving
-            print(f"Saving checkpoint at epoch {e+1}...")
+            if master_process:
+                print(f"Saving checkpoint at epoch {e+1}...")
             barrier()
             
             # Create directory on master process
@@ -222,52 +223,55 @@ def main(args):
             ema_path = os.path.join(dir_path, "ema.pt")
             weights_path = os.path.join(dir_path, "model.pt")
             
-            if master_process:
-                print(f"Saving checkpoint at epoch {e+1}...")
-            
             save_model_fsdp(diff_net, weights_path)
             save_model_fsdp(ema_net, ema_path)
             save_optimizer_fsdp(optim, opt_path)
             
             barrier()  # Wait for all ranks to finish saving
             
-            # Only master process generates samples and uploads
+            # CRITICAL FIX: All ranks must participate in sample generation
+            # because FSDP models use collective operations (ALLGATHER)
+            samples_eps_path = os.path.join(dir_path, "samples.png")
+            samples_ema_path = os.path.join(dir_path, "ema_sample.png")
+            
             if master_process:
-                samples_eps_path = os.path.join(dir_path, "samples.png")
-                samples_ema_path = os.path.join(dir_path, "ema_sample.png")
-                
-                # Generate sample images
                 print(f"Generating sample images...")
-                try:
-                    conditions_labels = ["bird", "cat", "dog"] *2 
-                    samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
-                    diff.set_model(ema_net)
-                    ema_samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
-                    diff.set_model(diff_net)
+            
+            try:
+                conditions_labels = ["bird", "cat", "dog"] * 2
+                # All ranks must participate in generation (FSDP requirement)
+                samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                diff.set_model(ema_net)
+                ema_samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                diff.set_model(diff_net)
+                
+                # Only master process saves and uploads
+                if master_process:
                     eps_grid = images_to_grid(samples, 3)
                     ema_grid = images_to_grid(ema_samples, 3)
                     eps_grid.save(samples_eps_path, format="PNG")
                     ema_grid.save(samples_ema_path, format="PNG")
                     print(f"Sample images saved")
-                except Exception as ex:
+                    
+                    if args.push_hub:
+                        print("Uploading to Hugging Face Hub...")
+                        try:
+                            upload_file_paths_to_hf([
+                                opt_path,
+                                ema_path,
+                                weights_path,
+                                samples_ema_path,
+                                samples_eps_path
+                            ])
+                        except Exception as ex:
+                            print(f"Failed to upload to Hub: {ex}")
+                    
+                    print(f"Checkpoint saved to {dir_path}")
+            except Exception as ex:
+                if master_process:
                     print(f"Failed to generate samples: {ex}")
-                
-                if args.push_hub:
-                    print("Uploading to Hugging Face Hub...")
-                    try:
-                        upload_file_paths_to_hf([
-                            opt_path,
-                            ema_path,
-                            weights_path,
-                            samples_ema_path,
-                            samples_eps_path
-                        ])
-                    except Exception as ex:
-                        print(f"Failed to upload to Hub: {ex}")
-                
-                print(f"Checkpoint saved to {dir_path}")
             
-            # Wait for master to finish saving
+            # Synchronize all ranks after generation
             barrier()
         
         torch.cuda.empty_cache()
