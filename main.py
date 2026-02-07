@@ -2,6 +2,7 @@ import os
 import time
 import torch
 import argparse
+import traceback
 import pandas as pd
 from torch.distributed import init_process_group, destroy_process_group, barrier, broadcast
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
@@ -66,12 +67,14 @@ def main(args):
         ema_path = os.path.join(weights_dir_path, "ema.pt")
         opt_path = os.path.join(weights_dir_path, "optim.pt")
 
-    vae = None
+    # CRITICAL FIX: Load VAE on ALL ranks for distributed generation
+    vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
+    vae.eval()
+    for p in vae.parameters():
+        p.requires_grad = False
+    
     if master_process:
-        vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
-        vae.eval()
-        for p in vae.parameters():
-            p.requires_grad = False
+        print("VAE loaded on all ranks for distributed generation")
     
     # Load model first
     diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
@@ -229,23 +232,37 @@ def main(args):
             
             barrier()  # Wait for all ranks to finish saving
             
-            # CRITICAL FIX: All ranks must participate in sample generation
-            # because FSDP models use collective operations (ALLGATHER)
+            # ADVANCED FIX: Generate samples on ALL ranks (FSDP requires collective ops)
+            # But only save on master
             samples_eps_path = os.path.join(dir_path, "samples.png")
             samples_ema_path = os.path.join(dir_path, "ema_sample.png")
             
             if master_process:
-                print(f"Generating sample images...")
+                print(f"Generating sample images (all ranks participating)...")
             
             try:
                 conditions_labels = ["bird", "cat", "dog"] * 2
-                # All ranks must participate in generation (FSDP requirement)
-                samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                
+                # ALL ranks must call generate() because it uses FSDP models
+                samples = diff.generate(
+                    args.num_gen_steps,
+                    conditions_labels,
+                    device=device,
+                    latent_shape=(4, 32, 32),
+                    return_trj=False
+                )
+                
                 diff.set_model(ema_net)
-                ema_samples = diff.generate(args.num_gen_steps, conditions_labels, device=device, latent_shape=(4, 32, 32), return_trj=False)
+                ema_samples = diff.generate(
+                    args.num_gen_steps,
+                    conditions_labels,
+                    device=device,
+                    latent_shape=(4, 32, 32),
+                    return_trj=False
+                )
                 diff.set_model(diff_net)
                 
-                # Only master process saves and uploads
+                # Only master saves the results
                 if master_process:
                     eps_grid = images_to_grid(samples, 3)
                     ema_grid = images_to_grid(ema_samples, 3)
@@ -267,9 +284,11 @@ def main(args):
                             print(f"Failed to upload to Hub: {ex}")
                     
                     print(f"Checkpoint saved to {dir_path}")
+                    
             except Exception as ex:
                 if master_process:
                     print(f"Failed to generate samples: {ex}")
+                    traceback.print_exc()
             
             # Synchronize all ranks after generation
             barrier()
