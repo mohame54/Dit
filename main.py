@@ -13,7 +13,9 @@ from utils import (
     load_json,
     CifarDataset,
     upload_file_paths_to_hf,
-    images_to_grid
+    images_to_grid,
+    set_seet,
+    download_checkpoint_from_hf
 )
 from Diffusion import RFDiffusion
 from fsdp_utils import ( 
@@ -26,12 +28,12 @@ from opt import DualOpt
 
 
 def cleanup():
-    """Cleanup distributed training."""
     destroy_process_group()
 
 
 def main(args):
     assert torch.cuda.is_available(), "for now i think we need CUDA for FSDP"
+    set_seed()
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     ddp_rank = int(os.environ['RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
@@ -66,6 +68,32 @@ def main(args):
         weights_path = os.path.join(weights_dir_path, "model.pt")
         ema_path = os.path.join(weights_dir_path, "ema.pt")
         opt_path = os.path.join(weights_dir_path, "optim.pt")
+    
+    # Resume training logic
+    if args.resume_dir:
+        if master_process:
+            # Only master process downloads to avoid race conditions
+            download_dir = download_checkpoint_from_hf(
+                "Muhammed164/Dit", 
+                args.resume_dir, 
+                resume_dir
+            )
+            print(f"Checkpoints downloaded to {download_dir}")
+        
+        # Wait for master to finish downloading
+        barrier()
+        
+        # All processes look for files in the same location
+        # download_checkpoint_from_hf returns os.path.join(local_dir, checkpoint_dir)
+        # so we reconstruct that path here
+        downloaded_weights_dir = os.path.join(resume_dir, args.resume_checkpoint_dir)
+        
+        weights_path = os.path.join(downloaded_weights_dir, "model.pt")
+        ema_path = os.path.join(downloaded_weights_dir, "ema.pt") 
+        opt_path = os.path.join(downloaded_weights_dir, "optim.pt")
+        
+        if master_process:
+            print(f"Resuming with weights from: {weights_path}")
 
     # CRITICAL FIX: Load VAE on ALL ranks for distributed generation
     vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
@@ -102,7 +130,7 @@ def main(args):
         optim = torch.optim.AdamW(diff_net.parameters(), lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
    
     if opt_path is not None and os.path.exists(opt_path):
-        load_optimizer_state_fsdp(optim, opt_path)
+        load_optimizer_state_fsdp(diff_net, optim, opt_path)
     
     # Create learning rate scheduler
     scheduler = None
@@ -228,7 +256,7 @@ def main(args):
             
             save_model_fsdp(diff_net, weights_path)
             save_model_fsdp(ema_net, ema_path)
-            save_optimizer_fsdp(optim, opt_path)
+            save_optimizer_fsdp(diff_net, optim, opt_path)
             
             barrier()  # Wait for all ranks to finish saving
             
@@ -345,5 +373,8 @@ if __name__ == "__main__":
     
     # Checkpoint saving
     parser.add_argument("--save-best", type=str_to_bool, default=False, help="Save checkpoint when achieving best validation loss")
+
+    # Resume training
+    parser.add_argument("--resume_dir", type=str, default="checkpoint_0", help="Directory inside the repo containing the checkpoint")
     
     main(parser.parse_args())

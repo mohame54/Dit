@@ -1,16 +1,15 @@
+import os
+import json
 import torch
+import random
+import numpy as np
+from PIL import Image
 from torch.utils.data import DataLoader, DistributedSampler
 from diffusers.models import AutoencoderKL
 from torch.utils.data import Dataset
 from torchvision import transforms as T
-import PIL.Image as Image
-import numpy as np
 from typing import Sequence, Optional
 import matplotlib.pyplot as plt
-import torch
-import json
-import os
-from PIL import Image
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import HfFolder
 
@@ -28,6 +27,40 @@ def upload_file_paths_to_hf(pathes):
             repo_id="Muhammed164/Dit",
             repo_type="model"
         )
+
+
+def download_checkpoint_from_hf(repo_id, checkpoint_dir, local_dir):
+    from huggingface_hub import hf_hub_download
+    
+    os.makedirs(local_dir, exist_ok=True)
+    
+    files_to_download = ["model.pt", "optim.pt", "ema.pt"]
+    
+    print(f"Downloading checkpoint from {repo_id}/{checkpoint_dir} to {local_dir}...")
+    
+    for filename in files_to_download:
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=f"{checkpoint_dir}/{filename}",
+                local_dir=local_dir,
+                local_dir_use_symlinks=False
+            )
+            # hf_hub_download preserves directory structure, so we might need to move files
+            # if we want them directly in local_dir. 
+            # However, hf_hub_download with local_dir usually mirrors the repo structure.
+            # Let's adjust to be robust. 
+            
+            # If checkpoint_dir is "checkpoint_20", the file will be at local_dir/checkpoint_20/model.pt
+            # We want them at local_dir/model.pt for easier loading if possible, or just return the path
+            
+        except Exception as e:
+            print(f"Failed to download {filename}: {e}")
+            
+    # Return the path where the files are actually located
+    # hf_hub_download downloads to local_dir/filename
+    # so if filename is checkpoint_20/model.pt, it's at local_dir/checkpoint_20/model.pt
+    return os.path.join(local_dir, checkpoint_dir)
 
 class CifarDataset(Dataset):
   def __init__(self, data_df, base_imgs_path="", val=False, img_sz=(256,256)):
@@ -153,3 +186,10 @@ def load_json(json_path, env_vars=True):
         for k in json_vars:
             os.environ.setdefault(k, json_vars[k])
     return json_vars
+
+
+def set_seet(seed=42):
+    random.seed(seed)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(seed)
