@@ -375,6 +375,6 @@ if __name__ == "__main__":
     parser.add_argument("--save-best", type=str_to_bool, default=False, help="Save checkpoint when achieving best validation loss")
 
     # Resume training
-    parser.add_argument("--resume_dir", type=str, default="checkpoint_0", help="Directory inside the repo containing the checkpoint")
+    parser.add_argument("--resume-dir", type=str, default="checkpoint_0", help="Directory inside the repo containing the checkpoint")
     
     main(parser.parse_args())
