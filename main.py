@@ -69,14 +69,15 @@ def main(args):
         ema_path = os.path.join(weights_dir_path, "ema.pt")
         opt_path = os.path.join(weights_dir_path, "optim.pt")
     
-    # Resume training logic
     if args.resume_dir:
         if master_process:
             # Only master process downloads to avoid race conditions
+            # usage: download_checkpoint_from_hf(repo_id, checkpoint_dir, local_dir)
+            # This downloads repo_id/checkpoint_dir/* to local_dir/checkpoint_dir/*
             download_dir = download_checkpoint_from_hf(
                 "Muhammed164/Dit", 
                 args.resume_dir, 
-                resume_dir
+                args.dir_path_save 
             )
             print(f"Checkpoints downloaded to {download_dir}")
         
@@ -85,8 +86,8 @@ def main(args):
         
         # All processes look for files in the same location
         # download_checkpoint_from_hf returns os.path.join(local_dir, checkpoint_dir)
-        # so we reconstruct that path here
-        downloaded_weights_dir = os.path.join(resume_dir, args.resume_checkpoint_dir)
+        # so we reconstruct that path here using the same logic
+        downloaded_weights_dir = os.path.join(args.dir_path_save, args.resume_dir)
         
         weights_path = os.path.join(downloaded_weights_dir, "model.pt")
         ema_path = os.path.join(downloaded_weights_dir, "ema.pt") 
@@ -375,6 +376,6 @@ if __name__ == "__main__":
     parser.add_argument("--save-best", type=str_to_bool, default=False, help="Save checkpoint when achieving best validation loss")
 
     # Resume training
-    parser.add_argument("--resume-dir", type=str, default="checkpoint_0", help="Directory inside the repo containing the checkpoint")
+    parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
     
     main(parser.parse_args())
