@@ -132,14 +132,21 @@ def main(args):
    
     if opt_path is not None and os.path.exists(opt_path):
         load_optimizer_state_fsdp(diff_net, optim, opt_path)
+        # CRITICAL FIX: Reset LR to initial config value, otherwise scheduler starts from decayed value
+        for param_group in optim.param_groups:
+            param_group['lr'] = opt_config['lr']
     
     # Create learning rate scheduler
     scheduler = None
     if args.use_scheduler:
+        # CRITICAL FIX: Set last_epoch so scheduler knows where to start in the curve
+        # args.cur_epochs is 0-indexed (e.g. 10 means 10 epochs finished, start 11th)
+        last_epoch = args.cur_epochs - 1
+        
         if args.scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=opt_config.get('min_lr', 1e-6))
+            scheduler = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=opt_config.get('min_lr', 1e-6), last_epoch=last_epoch)
         elif args.scheduler_type == "step":
-            scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma)
+            scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma, last_epoch=last_epoch)
         
         if master_process:
             print(f"Using {args.scheduler_type} scheduler")

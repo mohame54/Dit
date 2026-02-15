@@ -91,7 +91,7 @@ class RFDiffusion(ODSolversMixin):
         returns: scalar loss
         """
         B = x0.shape[0]
-        z = torch.randn_like(x0) * self.sigma
+        z = torch.randn_like(x0)
         t = self.sample_t(B, min_val=min_val, max_val=max_val, device=x0.device)  # (B,)
         t = t.to(dtype=x0.dtype)  # Match dtype for mixed precision
         t_b = t.view(B, 1, 1, 1)
