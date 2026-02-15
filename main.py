@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 import torch
 import argparse
@@ -95,6 +96,21 @@ def main(args):
         
         if master_process:
             print(f"Resuming with weights from: {weights_path}")
+        
+        # Resume logs if they exist
+        if master_process:
+            train_logs_src = os.path.join(downloaded_weights_dir, "train_logs.txt")
+            val_logs_src = os.path.join(downloaded_weights_dir, "val_logs.txt")
+            
+            os.makedirs(args.logs_save_dir, exist_ok=True)
+            
+            if os.path.exists(train_logs_src):
+                print(f"Resuming train logs from {train_logs_src}")
+                shutil.copy(train_logs_src, os.path.join(args.logs_save_dir, "train_logs.txt"))
+                
+            if os.path.exists(val_logs_src):
+                print(f"Resuming val logs from {val_logs_src}")
+                shutil.copy(val_logs_src, os.path.join(args.logs_save_dir, "val_logs.txt"))
 
     # CRITICAL FIX: Load VAE on ALL ranks for distributed generation
     vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
@@ -193,7 +209,8 @@ def main(args):
                 print(f"Current LR: {scheduler.get_last_lr()[0]:.6e}")
         
         # Training phase - all GPUs participate
-        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type)
+        # Training phase - all GPUs participate
+        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype)
         
         barrier()
         torch.cuda.empty_cache()
@@ -266,6 +283,20 @@ def main(args):
             save_model_fsdp(ema_net, ema_path)
             save_optimizer_fsdp(diff_net, optim, opt_path)
             
+            # Save logs with checkpoint
+            if master_process:
+                train_logs_src = os.path.join(logs_save_dir, "train_logs.txt")
+                val_logs_src = os.path.join(logs_save_dir, "val_logs.txt")
+                
+                train_logs_dest = os.path.join(dir_path, "train_logs.txt")
+                val_logs_dest = os.path.join(dir_path, "val_logs.txt")
+                
+                if os.path.exists(train_logs_src):
+                    shutil.copy(train_logs_src, train_logs_dest)
+                    
+                if os.path.exists(val_logs_src):
+                    shutil.copy(val_logs_src, val_logs_dest)
+            
             barrier()  # Wait for all ranks to finish saving
             
             # ADVANCED FIX: Generate samples on ALL ranks (FSDP requires collective ops)
@@ -314,7 +345,9 @@ def main(args):
                                 ema_path,
                                 weights_path,
                                 samples_ema_path,
-                                samples_eps_path
+                                samples_eps_path,
+                                os.path.join(dir_path, "train_logs.txt"),
+                                os.path.join(dir_path, "val_logs.txt")
                             ])
                         except Exception as ex:
                             print(f"Failed to upload to Hub: {ex}")

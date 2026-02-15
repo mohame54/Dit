@@ -21,7 +21,11 @@ def train_epoch(
     losses = []
     loop = tqdm(train_ds, desc="Training") if rank == 0 else train_ds
     
-    scaler = ShardedGradScaler()
+    # Only use scaler for float16 to prevent underflow
+    # bfloat16 has enough dynamic range and doesn't need scaling
+    use_scaler = (mp_dtype == torch.float16)
+    scaler = ShardedGradScaler() if use_scaler else None
+    
     for i, (inputs, labels) in enumerate(loop):
         with torch.amp.autocast(device_type="cuda",dtype=mp_dtype):
             inputs = inputs.to(rank, non_blocking=True)
@@ -35,16 +39,24 @@ def train_epoch(
             
             loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
             loss = loss / grad_accum_steps  # Scale loss
-
-        scaler.scale(loss).backward()
+            
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         
         if not is_accumulating:
             if max_norm is not None:
-                scaler.unscale_(opt)
+                if scaler is not None:
+                    scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(diff.model.parameters(), max_norm)
             
-            scaler.step(opt)
-            scaler.update()
+            if scaler is not None:
+                scaler.step(opt)
+                scaler.update()
+            else:
+                opt.step()
+                
             opt.zero_grad(set_to_none=True)
             
             if ema_model is not None:

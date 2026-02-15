@@ -34,7 +34,7 @@ def download_checkpoint_from_hf(repo_id, checkpoint_dir, local_dir):
     
     os.makedirs(local_dir, exist_ok=True)
     
-    files_to_download = ["model.pt", "optim.pt", "ema.pt"]
+    files_to_download = ["model.pt", "optim.pt", "ema.pt", "train_logs.txt", "val_logs.txt"]
     
     print(f"Downloading checkpoint from {repo_id}/{checkpoint_dir} to {local_dir}...")
     
