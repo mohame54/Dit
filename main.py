@@ -14,7 +14,7 @@ from utils import (
     CifarDataset,
     upload_file_paths_to_hf,
     images_to_grid,
-    set_seet,
+    set_seed,
     download_checkpoint_from_hf
 )
 from Diffusion import RFDiffusion

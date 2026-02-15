@@ -188,7 +188,7 @@ def load_json(json_path, env_vars=True):
     return json_vars
 
 
-def set_seet(seed=42):
+def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(42)
     torch.manual_seed(42)
