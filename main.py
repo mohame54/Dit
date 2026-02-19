@@ -167,7 +167,7 @@ def main(args):
         last_step = cur_steps - 1  # -1 because PyTorch uses -1 for "no steps done yet"
         
         if args.scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(optim, T_max=total_steps, eta_min=opt_config.get('min_lr', 1e-6), last_epoch=last_step)
+            scheduler = CosineAnnealingLR(optim, T_max=total_steps, eta_min=opt_config.get('min_lr', 8e-6), last_epoch=last_step)
         elif args.scheduler_type == "step":
             scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma, last_epoch=last_step)
         
