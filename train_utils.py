@@ -16,6 +16,7 @@ def train_epoch(
     ema_decay=0.999,
     grad_accum_steps=1,
     mp_dtype=torch.float16,
+    scheduler=None,
 ):
     diff.model.train()
     losses = []
@@ -58,6 +59,9 @@ def train_epoch(
                 opt.step()
                 
             opt.zero_grad(set_to_none=True)
+        
+            if scheduler is not None:
+                scheduler.step()
             
             if ema_model is not None:
                 update_ema_model_fsdp(diff.model, ema_model, ema_decay)

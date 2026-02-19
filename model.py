@@ -7,8 +7,8 @@ import math
 @dataclass
 class DitConfig:
       freq_dim: int= 256
-      hidden_dim:int = 768
-      num_blocks:int = 12
+      hidden_dim:int = 1024
+      num_blocks:int = 10
       bias: bool = True
       qkv_bias:bool = False
       num_classes:int = 3  # bird, cat, dog
@@ -20,12 +20,11 @@ class DitConfig:
       img_size:int = 32
       in_chs:int = 4
       out_chs:int = 4
-      drop_rate:float = 0.2
+      drop_rate:float = 0.1
       add_conv_final: bool = False
       add_norm_embd: bool = False
       use_gate_mlp: bool = True
       mlp_bias: bool = False
-      mlp_dim: int = 2 * 768
       flip_sin_to_cos: bool = True
       label_drop_prob: float = 0.1
 

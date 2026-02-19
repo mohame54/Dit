@@ -124,6 +124,10 @@ def main(args):
     # Load model first
     diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
     
+    if master_process:
+        num_params = sum(p.numel() for p in diff_net.parameters())
+        print(f"Model parameters: {num_params / 1e6:.3f}M parameters")
+    
     # Create EMA model - FSDP doesn't support deepcopy, so we create a new instance
     if ema_path is not None and os.path.exists(ema_path):
         ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
@@ -152,20 +156,23 @@ def main(args):
         for param_group in optim.param_groups:
             param_group['lr'] = opt_config['lr']
     
-    # Create learning rate scheduler
+    # Create learning rate scheduler (step-based, not epoch-based)
     scheduler = None
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * args.epochs
+    cur_steps = steps_per_epoch * args.cur_epochs
+    
     if args.use_scheduler:
-        # CRITICAL FIX: Set last_epoch so scheduler knows where to start in the curve
-        # args.cur_epochs is 0-indexed (e.g. 10 means 10 epochs finished, start 11th)
-        last_epoch = args.cur_epochs - 1
+        # last_epoch in PyTorch scheduler actually means last_step here since we step per optimizer step
+        last_step = cur_steps - 1  # -1 because PyTorch uses -1 for "no steps done yet"
         
         if args.scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=opt_config.get('min_lr', 1e-6), last_epoch=last_epoch)
+            scheduler = CosineAnnealingLR(optim, T_max=total_steps, eta_min=opt_config.get('min_lr', 1e-6), last_epoch=last_step)
         elif args.scheduler_type == "step":
-            scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma, last_epoch=last_epoch)
+            scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma, last_epoch=last_step)
         
         if master_process:
-            print(f"Using {args.scheduler_type} scheduler")
+            print(f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, resuming from step {max(cur_steps, 0)})")
     
     barrier()
     
@@ -210,18 +217,14 @@ def main(args):
         
         # Training phase - all GPUs participate
         # Training phase - all GPUs participate
-        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype)
+        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype, scheduler=scheduler)
         
         barrier()
         torch.cuda.empty_cache()
         
         # Validation phase
         val_losses = val_epoch(diff, val_loader, local_rank, args.loss_type)
-        
-        # Step the scheduler after validation
-        if scheduler is not None:
-            scheduler.step()
-        
+                
         barrier()
         
         # Calculate average losses
