@@ -25,6 +25,12 @@ from fsdp_utils import (
     save_model_fsdp,
     save_optimizer_fsdp
 )
+from ddp_utils import (
+    load_ddp_model,
+    load_optimizer_state_ddp,
+    save_model_ddp,
+    save_optimizer_ddp
+)
 from opt import DualOpt
 
 
@@ -33,7 +39,8 @@ def cleanup():
 
 
 def main(args):
-    assert torch.cuda.is_available(), "for now i think we need CUDA for FSDP"
+    use_fsdp = args.dist_mode == "fsdp"
+    assert torch.cuda.is_available(), "CUDA is required for distributed training"
     set_seed()
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     ddp_rank = int(os.environ['RANK'])
@@ -121,22 +128,33 @@ def main(args):
     if master_process:
         print("VAE loaded on all ranks for distributed generation")
     
-    # Load model first
-    diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
+    # Load model
+    if use_fsdp:
+        diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
+    else:
+        diff_net = load_ddp_model(use_mp, mp_dtype, weights_path=weights_path, device=device)
     
     if master_process:
         num_params = sum(p.numel() for p in diff_net.parameters())
         print(f"Model parameters: {num_params / 1e6:.3f}M parameters")
     
-    # Create EMA model - FSDP doesn't support deepcopy, so we create a new instance
-    if ema_path is not None and os.path.exists(ema_path):
-        ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
+    # Create EMA model
+    if use_fsdp:
+        if ema_path is not None and os.path.exists(ema_path):
+            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
+        else:
+            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None)
+            with torch.no_grad():
+                ema_state = diff_net.state_dict()
+                ema_net.load_state_dict(ema_state, assign=True)
     else:
-        # Create a new FSDP model and copy the state dict from diff_net
-        ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None)
-        with torch.no_grad():
-            ema_state = diff_net.state_dict()
-            ema_net.load_state_dict(ema_state, assign=True)
+        if ema_path is not None and os.path.exists(ema_path):
+            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=ema_path, device=device)
+        else:
+            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=None, device=device)
+            with torch.no_grad():
+                ema_state = diff_net.module.state_dict()
+                ema_net.module.load_state_dict(ema_state)
     
     for p in ema_net.parameters():
         p.requires_grad = False
@@ -145,14 +163,19 @@ def main(args):
     
     # Create optimizer AFTER diff_net is defined
     opt_config = load_json("opt_config.json", env_vars=False)
+    # For DDP, the optimizer needs the unwrapped model's parameters
+    model_for_opt = diff_net if use_fsdp else diff_net.module
     if args.use_moun:
-        optim = DualOpt(diff_net, lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
+        optim = DualOpt(model_for_opt, lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
     else:
-        optim = torch.optim.AdamW(diff_net.parameters(), lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
+        optim = torch.optim.AdamW(model_for_opt.parameters(), lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
    
     if opt_path is not None and os.path.exists(opt_path):
-        load_optimizer_state_fsdp(diff_net, optim, opt_path)
-        # CRITICAL FIX: Reset LR to initial config value, otherwise scheduler starts from decayed value
+        if use_fsdp:
+            load_optimizer_state_fsdp(diff_net, optim, opt_path)
+        else:
+            load_optimizer_state_ddp(optim, opt_path)
+        # Reset LR to initial config value, otherwise scheduler starts from decayed value
         for param_group in optim.param_groups:
             param_group['lr'] = opt_config['lr']
     
@@ -217,7 +240,7 @@ def main(args):
         
         # Training phase - all GPUs participate
         # Training phase - all GPUs participate
-        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype, scheduler=scheduler)
+        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype, scheduler=scheduler, use_fsdp=use_fsdp)
         
         barrier()
         torch.cuda.empty_cache()
@@ -260,7 +283,7 @@ def main(args):
         broadcast(is_best_tensor, src=0)
         is_best = bool(is_best_tensor.item())
         
-        # Checkpoint saving - all ranks need to participate in FSDP state collection
+        # Checkpoint saving - FSDP needs all ranks; DDP only rank 0
         should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
         
         if should_save:
@@ -276,15 +299,19 @@ def main(args):
             
             barrier()  # Wait for directory creation
             
-            # All ranks need to participate in FSDP state collection
             dir_path = os.path.join(args.dir_path_save, f"checkpoint_{e+1}")
             opt_path = os.path.join(dir_path, "optim.pt")
             ema_path = os.path.join(dir_path, "ema.pt")
             weights_path = os.path.join(dir_path, "model.pt")
             
-            save_model_fsdp(diff_net, weights_path)
-            save_model_fsdp(ema_net, ema_path)
-            save_optimizer_fsdp(diff_net, optim, opt_path)
+            if use_fsdp:
+                save_model_fsdp(diff_net, weights_path)
+                save_model_fsdp(ema_net, ema_path)
+                save_optimizer_fsdp(diff_net, optim, opt_path)
+            else:
+                save_model_ddp(diff_net, weights_path)
+                save_model_ddp(ema_net, ema_path)
+                save_optimizer_ddp(optim, opt_path)
             
             # Save logs with checkpoint
             if master_process:
@@ -302,60 +329,60 @@ def main(args):
             
             barrier()  # Wait for all ranks to finish saving
             
-            # ADVANCED FIX: Generate samples on ALL ranks (FSDP requires collective ops)
-            # But only save on master
             samples_eps_path = os.path.join(dir_path, "samples.png")
             samples_ema_path = os.path.join(dir_path, "ema_sample.png")
             
+            should_generate = use_fsdp or master_process
+            
             if master_process:
-                print(f"Generating sample images (all ranks participating)...")
+                print(f"Generating sample images...")
             
             try:
-                conditions_labels = ["bird", "cat", "dog"] * 2
-                
-                # ALL ranks must call generate() because it uses FSDP models
-                samples = diff.generate(
-                    args.num_gen_steps,
-                    conditions_labels,
-                    device=device,
-                    latent_shape=(4, 32, 32),
-                    return_trj=False
-                )
-                
-                diff.set_model(ema_net)
-                ema_samples = diff.generate(
-                    args.num_gen_steps,
-                    conditions_labels,
-                    device=device,
-                    latent_shape=(4, 32, 32),
-                    return_trj=False
-                )
-                diff.set_model(diff_net)
-                
-                # Only master saves the results
-                if master_process:
-                    eps_grid = images_to_grid(samples, 3)
-                    ema_grid = images_to_grid(ema_samples, 3)
-                    eps_grid.save(samples_eps_path, format="PNG")
-                    ema_grid.save(samples_ema_path, format="PNG")
-                    print(f"Sample images saved")
+                if should_generate:
+                    conditions_labels = ["bird", "cat", "dog"] * 2
                     
-                    if args.push_hub:
-                        print("Uploading to Hugging Face Hub...")
-                        try:
-                            upload_file_paths_to_hf([
-                                opt_path,
-                                ema_path,
-                                weights_path,
-                                samples_ema_path,
-                                samples_eps_path,
-                                os.path.join(dir_path, "train_logs.txt"),
-                                os.path.join(dir_path, "val_logs.txt")
-                            ])
-                        except Exception as ex:
-                            print(f"Failed to upload to Hub: {ex}")
+                    samples = diff.generate(
+                        args.num_gen_steps,
+                        conditions_labels,
+                        device=device,
+                        latent_shape=(4, 32, 32),
+                        return_trj=False
+                    )
                     
-                    print(f"Checkpoint saved to {dir_path}")
+                    diff.set_model(ema_net)
+                    ema_samples = diff.generate(
+                        args.num_gen_steps,
+                        conditions_labels,
+                        device=device,
+                        latent_shape=(4, 32, 32),
+                        return_trj=False
+                    )
+                    diff.set_model(diff_net)
+                    
+                    # Only master saves the results
+                    if master_process:
+                        eps_grid = images_to_grid(samples, 3)
+                        ema_grid = images_to_grid(ema_samples, 3)
+                        eps_grid.save(samples_eps_path, format="PNG")
+                        ema_grid.save(samples_ema_path, format="PNG")
+                        print(f"Sample images saved")
+                        
+                        if args.push_hub:
+                            print("Uploading to Hugging Face Hub...")
+                            try:
+                                upload_file_paths_to_hf([
+                                    opt_path,
+                                    ema_path,
+                                    weights_path,
+                                    samples_ema_path,
+                                    samples_eps_path,
+                                    os.path.join(dir_path, "train_logs.txt"),
+                                    os.path.join(dir_path, "val_logs.txt")
+                                ])
+                            except Exception as ex:
+                                print(f"Failed to upload to Hub: {ex}")
+                        
+                        print(f"Checkpoint saved to {dir_path}")
                     
             except Exception as ex:
                 if master_process:
@@ -408,6 +435,9 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir-path", type=str, default="data")
     parser.add_argument("--push-hub", type=str_to_bool, default=True)
     parser.add_argument("--num-gen-steps", type=int, default=64, help="Number of diffusion sampling steps")
+    
+    # Distributed mode
+    parser.add_argument("--dist-mode", type=str, default="ddp", choices=["fsdp", "ddp"], help="Distributed training mode")
     
     # Scheduler arguments
     parser.add_argument("--use-scheduler", type=str_to_bool, default=True, help="Use learning rate scheduler")

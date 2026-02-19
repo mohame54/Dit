@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from tqdm import tqdm
 from Diffusion import RFDiffusion
 import torch.distributed as dist
@@ -17,6 +18,7 @@ def train_epoch(
     grad_accum_steps=1,
     mp_dtype=torch.float16,
     scheduler=None,
+    use_fsdp=True,
 ):
     diff.model.train()
     losses = []
@@ -25,26 +27,34 @@ def train_epoch(
     # Only use scaler for float16 to prevent underflow
     # bfloat16 has enough dynamic range and doesn't need scaling
     use_scaler = (mp_dtype == torch.float16)
-    scaler = ShardedGradScaler() if use_scaler else None
+    if use_scaler:
+        scaler = ShardedGradScaler() if use_fsdp else torch.amp.GradScaler()
+    else:
+        scaler = None
     
     for i, (inputs, labels) in enumerate(loop):
-        with torch.amp.autocast(device_type="cuda",dtype=mp_dtype):
-            inputs = inputs.to(rank, non_blocking=True)
-            labels = labels.to(rank, non_blocking=True)
-            
-            is_accumulating = (i + 1) % grad_accum_steps != 0
-            
-            # Control gradient sync for FSDP2
+        inputs = inputs.to(rank, non_blocking=True)
+        labels = labels.to(rank, non_blocking=True)
+        
+        is_accumulating = (i + 1) % grad_accum_steps != 0
+        
+        # Control gradient sync: DDP uses no_sync(), FSDP uses set_requires_gradient_sync
+        if is_accumulating and not use_fsdp:
+            sync_ctx = diff.model.no_sync()
+        else:
             if hasattr(diff.model, 'set_requires_gradient_sync'):
                 diff.model.set_requires_gradient_sync(not is_accumulating)
+            sync_ctx = nullcontext()
+        
+        with sync_ctx:
+            with torch.amp.autocast(device_type="cuda", dtype=mp_dtype):
+                loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
+                loss = loss / grad_accum_steps
             
-            loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
-            loss = loss / grad_accum_steps  # Scale loss
-            
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
         
         if not is_accumulating:
             if max_norm is not None:
@@ -64,7 +74,7 @@ def train_epoch(
                 scheduler.step()
             
             if ema_model is not None:
-                update_ema_model_fsdp(diff.model, ema_model, ema_decay)
+                update_ema_model(diff.model, ema_model, ema_decay)
         
         loss_scalar = loss.detach() * grad_accum_steps
         dist.all_reduce(loss_scalar, op=dist.ReduceOp.AVG)
@@ -100,7 +110,7 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss"):
     return losses if rank == 0 else []
 
 
-def update_ema_model_fsdp(model, ema_model, decay):
+def update_ema_model(model, ema_model, decay):
     with torch.no_grad():
         for ema_p, p in zip(ema_model.parameters(), model.parameters()):
             ema_p.mul_(decay).add_(p, alpha=1 - decay)
