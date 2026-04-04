@@ -126,7 +126,6 @@ class RFDiffusion(ODSolversMixin):
         dt = 1.0 / float(steps)
         steps += 1 # include t=0
         x = z_init
-        self.model.eval()
         t_vals = torch.linspace(self.n_steps, 0.0, steps, device=device) / self.n_steps
         traj = []
         if return_traj:
@@ -170,7 +169,6 @@ class RFDiffusion(ODSolversMixin):
                 raise ValueError(f"Unknown sampling_method: {self.sampling_method}")
             if return_traj:
                 traj.append(x.cpu())
-        self.model.train()
         if return_traj:
             return x, traj
         return x

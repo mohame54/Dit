@@ -140,6 +140,8 @@ def compute_fid_score(
     image generation involves the sharded model. Real image collection and the
     metric computation itself are rank-0 only.
 
+    ``rank`` must be the process global rank (``dist.get_rank()``)
+
     fid_feature controls the Inception layer used for statistics (64, 192, 768, 2048).
     The scipy matrix square root in compute() scales as O(fid_feature³), so smaller
     values are dramatically faster. For num_samples < 2048, use feature=64 or 192
@@ -167,36 +169,51 @@ def compute_fid_score(
     )
 
     # ── Real images (rank 0 only — VAE is a plain nn.Module, no NCCL involved) ──
+    # Use an error-broadcast pattern so that if rank 0 raises during real-image
+    # processing, all other ranks learn about it and raise too instead of hanging
+    # forever at the barrier below.
     fid_metric = None
-    if is_master:
-        fid_metric = (
-            FrechetInceptionDistance(feature=fid_feature, normalize=True)
-            .to(device)
-            .set_dtype(torch.float64)
-        )
-        real_loader = _DataLoader(
-            val_ds, batch_size=fid_batch_size, shuffle=False, num_workers=2
-        )
-        real_count = 0
-        real_bar = tqdm(
-            total=num_samples,
-            desc="FID real images",
-            unit="img",
-            leave=False,
-        )
-        for latents, _ in real_loader:
-            latents = latents.to(device)
-            raw = latents / vae_scale_factor  # undo the SCALE_CONSTANT applied by the dataset
-            with autocast_ctx:
-                decoded = diff.vae.decode(raw).sample
-            decoded = (decoded.float() * 0.5 + 0.5).clamp(0.0, 1.0)
-            fid_metric.update(decoded, real=True)
-            batch_n = decoded.shape[0]
-            real_count += batch_n
-            real_bar.update(batch_n)
-            if real_count >= num_samples:
-                break
-        real_bar.close()
+    _real_error = torch.zeros(1, device=device)
+    try:
+        if is_master:
+            fid_metric = (
+                FrechetInceptionDistance(feature=fid_feature, normalize=True, sync_on_compute=False)
+                .to(device)
+                .set_dtype(torch.float64)
+            )
+            real_loader = _DataLoader(
+                val_ds, batch_size=fid_batch_size, shuffle=False, num_workers=2
+            )
+            real_count = 0
+            real_bar = tqdm(
+                total=num_samples,
+                desc="FID real images",
+                unit="img",
+                leave=False,
+            )
+            for latents, _ in real_loader:
+                latents = latents.to(device)
+                raw = latents / vae_scale_factor  # undo the SCALE_CONSTANT applied by the dataset
+                with autocast_ctx:
+                    decoded = diff.vae.decode(raw).sample
+                decoded = (decoded.float() * 0.5 + 0.5).clamp(0.0, 1.0)
+                fid_metric.update(decoded, real=True)
+                batch_n = decoded.shape[0]
+                real_count += batch_n
+                real_bar.update(batch_n)
+                if real_count >= num_samples:
+                    break
+            real_bar.close()
+    except Exception:
+        _real_error[0] = 1.0
+    finally:
+        # Always synchronize so non-master ranks don't hang waiting for this barrier
+        # if rank 0 raised an exception during real-image processing.
+        dist.barrier()
+
+    dist.all_reduce(_real_error, op=dist.ReduceOp.MAX)
+    if _real_error[0].item() > 0:
+        raise RuntimeError("FID real-image collection failed on master rank; aborting all ranks.")
 
     # ── Fake images (all ranks participate — model may be FSDP-sharded) ────────
     labels_cycle = (gen_labels * (num_samples // len(gen_labels) + 1))[:num_samples]

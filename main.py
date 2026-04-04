@@ -299,7 +299,7 @@ def main(args):
                     fid_batch_size=args.fid_batch_size,
                     vae_scale_factor=SCALE_CONSTANT,
                     mp_dtype=mp_dtype if use_mp else None,
-                    rank=local_rank,
+                    rank=ddp_rank,
                     fid_feature=args.fid_feature,
                 )
                 if master_process and fid_score is not None:
@@ -310,8 +310,9 @@ def main(args):
                 if master_process:
                     print(f"FID computation failed at epoch {e + 1}: {ex}")
                     traceback.print_exc()
-            barrier()
-            torch.cuda.empty_cache()
+            finally:
+                barrier()
+                torch.cuda.empty_cache()
         
         # Checkpoint saving - FSDP needs all ranks; DDP only rank 0
         should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
@@ -363,25 +364,28 @@ def main(args):
             try:
                 if should_generate:
                     conditions_labels = ["bird", "cat", "dog"] * 2
-                    
-                    samples = diff.generate(
-                        args.num_gen_steps,
-                        conditions_labels,
-                        device=device,
-                        latent_shape=(4, 32, 32),
-                        return_trj=False
-                    )
-                    
-                    diff.set_model(ema_net)
-                    ema_samples = diff.generate(
-                        args.num_gen_steps,
-                        conditions_labels,
-                        device=device,
-                        latent_shape=(4, 32, 32),
-                        return_trj=False
-                    )
-                    diff.set_model(diff_net)
-                    
+
+                    diff.model.eval()
+                    with torch.no_grad():
+                        samples = diff.generate(
+                            args.num_gen_steps,
+                            conditions_labels,
+                            device=device,
+                            latent_shape=(4, 32, 32),
+                            return_trj=False
+                        )
+
+                        diff.set_model(ema_net)
+                        ema_samples = diff.generate(
+                            args.num_gen_steps,
+                            conditions_labels,
+                            device=device,
+                            latent_shape=(4, 32, 32),
+                            return_trj=False
+                        )
+                        diff.set_model(diff_net)
+                    diff.model.train()
+
                     # Only master saves the results
                     if master_process:
                         eps_grid = images_to_grid(samples, 3)
@@ -477,9 +481,9 @@ if __name__ == "__main__":
 
     # FID evaluation
     parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")
-    parser.add_argument("--num-fid-samples", type=int, default=2048, help="Number of real/fake image pairs for FID (>=2048 recommended)")
+    parser.add_argument("--num-fid-samples", type=int, default=128, help="Number of real/fake image pairs for FID (>=2048 recommended)")
     parser.add_argument("--fid-batch-size", type=int, default=16, help="Batch size used when generating images for FID")
-    parser.add_argument("--fid-feature", type=int, default=2048, choices=[64, 192, 768, 2048],
+    parser.add_argument("--fid-feature", type=int, default=64, choices=[64, 192, 768, 2048],
                         help="Inception feature layer for FID. scipy sqrtm cost is O(n³): "
                              "64→instant, 192→fast, 768→slow, 2048→very slow. "
                              "Use 64 or 192 when num-fid-samples < 2048.")
