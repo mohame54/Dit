@@ -1,7 +1,7 @@
 import torch
 from typing import Union, List
 from .solvers import ODSolversMixin
-
+from utils import unscale_latent
 LABEL_DICT = {
     "bird":0,
     "cat":1,
@@ -98,8 +98,9 @@ class RFDiffusion(ODSolversMixin):
         x_t = (1.0 - t_b) * x0 + t_b * z  # linear path
         v_pred = self.model(x_t, self.to_t_inds(t), cond=cond)
         target_v = (z - x0)
-        loss_fn = getattr(torch.nn.functional, loss_type)
-        if loss_fn == None:
+       
+        loss_fn = getattr(torch.nn.functional, loss_type, None)
+        if loss_fn is None:
             raise ValueError(f"Unknown loss type: {loss_type}")
         loss = loss_fn(v_pred, target_v) 
         return loss
@@ -164,7 +165,7 @@ class RFDiffusion(ODSolversMixin):
             elif self.sampling_method == "rk":
                 t_batch_next = torch.full((x.shape[0],), fill_value=t_vals[i + 1], device=device)
                 t_batch_next = self.to_t_inds(t_batch_next)
-                x = self.rk2_step(x, dt, v, t_batch, t_batch_next, model_fn)
+                x = self.rk2_step(x, dt, v, t_batch_next, model_fn)
             else:
                 raise ValueError(f"Unknown sampling_method: {self.sampling_method}")
             if return_traj:
@@ -202,12 +203,12 @@ class RFDiffusion(ODSolversMixin):
         )
         if return_trj:
             latents, traj = samples
-            latents = (latents * (1/ 0.18215)).to(device)
-            traj = [(lat * (1/ 0.18215)).to(device) for lat in traj]
+            latents = (unscale_latent(latents)).to(device)
+            traj = [unscale_latent(lat).to(device) for lat in traj]
             all_latents = torch.cat([latents] + traj)
         else:
             latents = samples
-            latents = latents * (1/ 0.18215)
+            latents = unscale_latent(latents)
             all_latents = latents
 
         

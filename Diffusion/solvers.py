@@ -20,12 +20,11 @@ class ODSolversMixin:
         x: torch.Tensor,
         dt: float,
         model_output: torch.Tensor,
-        t_1,
-        t_2,
+        t_next,
         model_fn,
     ) -> torch.Tensor:
         x_2 = x - dt * model_output
-        model_output_2 = model_fn(x_2, t_2)
+        model_output_2 = model_fn(x_2, t_next)
         x_next = x - (dt / 2) * (model_output + model_output_2)
         return x_next
         

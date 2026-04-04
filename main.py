@@ -7,7 +7,7 @@ import traceback
 import pandas as pd
 from torch.distributed import init_process_group, destroy_process_group, barrier, broadcast
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
-from train_utils import train_epoch, val_epoch
+from train_utils import train_epoch, val_epoch, compute_fid_score
 from utils import (
     get_vae,
     load_data_loader_ddp,
@@ -16,14 +16,16 @@ from utils import (
     upload_file_paths_to_hf,
     images_to_grid,
     set_seed,
-    download_checkpoint_from_hf
+    download_checkpoint_from_hf,
+    SCALE_CONSTANT
 )
 from Diffusion import RFDiffusion
 from fsdp_utils import ( 
     load_fsdp_model,
     load_optimizer_state_fsdp,
     save_model_fsdp,
-    save_optimizer_fsdp
+    save_optimizer_fsdp,
+    copy_fsdp_model_state,
 )
 from ddp_utils import (
     load_ddp_model,
@@ -111,13 +113,11 @@ def main(args):
             
             os.makedirs(args.logs_save_dir, exist_ok=True)
             
-            if os.path.exists(train_logs_src):
-                print(f"Resuming train logs from {train_logs_src}")
-                shutil.copy(train_logs_src, os.path.join(args.logs_save_dir, "train_logs.txt"))
-                
-            if os.path.exists(val_logs_src):
-                print(f"Resuming val logs from {val_logs_src}")
-                shutil.copy(val_logs_src, os.path.join(args.logs_save_dir, "val_logs.txt"))
+            for log_name in ("train_logs.txt", "val_logs.txt", "fid_logs.txt"):
+                src = os.path.join(downloaded_weights_dir, log_name)
+                if os.path.exists(src):
+                    print(f"Resuming {log_name} from {src}")
+                    shutil.copy(src, os.path.join(args.logs_save_dir, log_name))
 
     # CRITICAL FIX: Load VAE on ALL ranks for distributed generation
     vae = get_vae(model_id=args.vae_model_id, rank=local_rank)
@@ -144,9 +144,7 @@ def main(args):
             ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
         else:
             ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None)
-            with torch.no_grad():
-                ema_state = diff_net.state_dict()
-                ema_net.load_state_dict(ema_state, assign=True)
+            copy_fsdp_model_state(diff_net, ema_net)
     else:
         if ema_path is not None and os.path.exists(ema_path):
             ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=ema_path, device=device)
@@ -221,6 +219,7 @@ def main(args):
     
     train_logs_path = os.path.join(logs_save_dir, "train_logs.txt")
     val_logs_path = os.path.join(logs_save_dir, "val_logs.txt")
+    fid_logs_path = os.path.join(logs_save_dir, "fid_logs.txt")
     
     torch.cuda.empty_cache()
     
@@ -246,7 +245,7 @@ def main(args):
         torch.cuda.empty_cache()
         
         # Validation phase
-        val_losses = val_epoch(diff, val_loader, local_rank, args.loss_type)
+        val_losses = val_epoch(diff, val_loader, local_rank, args.loss_type, mp_dtype=mp_dtype)
                 
         barrier()
         
@@ -283,6 +282,36 @@ def main(args):
         broadcast(is_best_tensor, src=0)
         is_best = bool(is_best_tensor.item())
         
+        # FID computation (independent of checkpoint saving frequency)
+        if args.fid_freq > 0 and (e + 1) % args.fid_freq == 0:
+            if master_process:
+                print(f"Computing FID at epoch {e + 1}...")
+            try:
+                # All ranks participate (generate() needs FSDP shards from all ranks)
+                fid_score = compute_fid_score(
+                    diff=diff,
+                    val_ds=val_ds,
+                    num_samples=args.num_fid_samples,
+                    gen_steps=args.num_gen_steps,
+                    latent_shape=(4, 32, 32),
+                    device=device,
+                    gen_labels=["bird", "cat", "dog"],
+                    fid_batch_size=args.fid_batch_size,
+                    vae_scale_factor=SCALE_CONSTANT,
+                    mp_dtype=mp_dtype if use_mp else None,
+                    rank=local_rank,
+                )
+                if master_process and fid_score is not None:
+                    print(f"FID at epoch {e + 1}: {fid_score:.4f}")
+                    with open(fid_logs_path, "a") as f:
+                        f.write(f"epoch_{e + 1}: {fid_score:.6f}\n")
+            except Exception as ex:
+                if master_process:
+                    print(f"FID computation failed at epoch {e + 1}: {ex}")
+                    traceback.print_exc()
+            barrier()
+            torch.cuda.empty_cache()
+        
         # Checkpoint saving - FSDP needs all ranks; DDP only rank 0
         should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
         
@@ -315,17 +344,10 @@ def main(args):
             
             # Save logs with checkpoint
             if master_process:
-                train_logs_src = os.path.join(logs_save_dir, "train_logs.txt")
-                val_logs_src = os.path.join(logs_save_dir, "val_logs.txt")
-                
-                train_logs_dest = os.path.join(dir_path, "train_logs.txt")
-                val_logs_dest = os.path.join(dir_path, "val_logs.txt")
-                
-                if os.path.exists(train_logs_src):
-                    shutil.copy(train_logs_src, train_logs_dest)
-                    
-                if os.path.exists(val_logs_src):
-                    shutil.copy(val_logs_src, val_logs_dest)
+                for log_name in ("train_logs.txt", "val_logs.txt", "fid_logs.txt"):
+                    src = os.path.join(logs_save_dir, log_name)
+                    if os.path.exists(src):
+                        shutil.copy(src, os.path.join(dir_path, log_name))
             
             barrier()  # Wait for all ranks to finish saving
             
@@ -377,7 +399,8 @@ def main(args):
                                     samples_ema_path,
                                     samples_eps_path,
                                     os.path.join(dir_path, "train_logs.txt"),
-                                    os.path.join(dir_path, "val_logs.txt")
+                                    os.path.join(dir_path, "val_logs.txt"),
+                                    os.path.join(dir_path, "fid_logs.txt"),
                                 ])
                             except Exception as ex:
                                 print(f"Failed to upload to Hub: {ex}")
@@ -450,5 +473,10 @@ if __name__ == "__main__":
 
     # Resume training
     parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
+
+    # FID evaluation
+    parser.add_argument("--fid-freq", type=int, default=0, help="Compute FID every N epochs (0 = disabled)")
+    parser.add_argument("--num-fid-samples", type=int, default=2048, help="Number of real/fake image pairs for FID (>=2048 recommended)")
+    parser.add_argument("--fid-batch-size", type=int, default=16, help="Batch size used when generating images for FID")
     
     main(parser.parse_args())

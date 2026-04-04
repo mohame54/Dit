@@ -3,7 +3,6 @@ import functools
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import (
     MixedPrecision,
-    BackwardPrefetch,
     ShardingStrategy,
     FullStateDictConfig,
     StateDictType,
@@ -67,8 +66,15 @@ def load_optimizer_state_fsdp(model, opt, opt_state_path):
             sharded_state = FSDP.optim_state_dict_to_load(model, opt, full_sd)
             opt.load_state_dict(sharded_state)
 
+def copy_fsdp_model_state(src_model, dst_model):
+    gather_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
+    with FSDP.state_dict_type(src_model, StateDictType.FULL_STATE_DICT, gather_policy):
+        full_sd = src_model.state_dict()
+    with FSDP.state_dict_type(dst_model, StateDictType.FULL_STATE_DICT):
+        dst_model.load_state_dict(full_sd)
+
+
 def load_model_state_fsdp(model, weights_path):
-    """Load model state dict into FSDP model using official approach."""
     full_sd = torch.load(
         weights_path,
         mmap=True,
