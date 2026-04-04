@@ -165,6 +165,12 @@ def compute_fid_score(
             val_ds, batch_size=fid_batch_size, shuffle=False, num_workers=2
         )
         real_count = 0
+        real_bar = tqdm(
+            total=num_samples,
+            desc="FID real images",
+            unit="img",
+            leave=False,
+        )
         for latents, _ in real_loader:
             latents = latents.to(device)
             raw = latents / vae_scale_factor  # undo the SCALE_CONSTANT applied by the dataset
@@ -172,13 +178,23 @@ def compute_fid_score(
                 decoded = diff.vae.decode(raw).sample
             decoded = (decoded.float() * 0.5 + 0.5).clamp(0.0, 1.0)
             fid_metric.update(decoded, real=True)
-            real_count += decoded.shape[0]
+            batch_n = decoded.shape[0]
+            real_count += batch_n
+            real_bar.update(batch_n)
             if real_count >= num_samples:
                 break
+        real_bar.close()
 
     # ── Fake images (all ranks participate — model may be FSDP-sharded) ────────
     labels_cycle = (gen_labels * (num_samples // len(gen_labels) + 1))[:num_samples]
     fake_count = 0
+    gen_bar = tqdm(
+        total=num_samples,
+        desc="FID generated",
+        unit="img",
+        leave=False,
+        disable=not is_master,   # only rank 0 shows the bar
+    )
     for start in range(0, num_samples, fid_batch_size):
         batch_labels = labels_cycle[start : start + fid_batch_size]
         fake_imgs = diff.generate(
@@ -190,10 +206,13 @@ def compute_fid_score(
             cfg_fac=2.0,
         )
         if is_master:
-            fid_metric.update(fake_imgs.float(), real=False)
-        fake_count += len(batch_labels)
+            fid_metric.update(fake_imgs.float().to(device), real=False)
+        batch_n = len(batch_labels)
+        fake_count += batch_n
+        gen_bar.update(batch_n)
         if fake_count >= num_samples:
             break
+    gen_bar.close()
 
     diff.model.train()
 
