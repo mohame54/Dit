@@ -475,7 +475,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
 
     # FID evaluation
-    parser.add_argument("--fid-freq", type=int, default=0, help="Compute FID every N epochs (0 = disabled)")
+    parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")
     parser.add_argument("--num-fid-samples", type=int, default=2048, help="Number of real/fake image pairs for FID (>=2048 recommended)")
     parser.add_argument("--fid-batch-size", type=int, default=16, help="Batch size used when generating images for FID")
     
