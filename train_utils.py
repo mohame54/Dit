@@ -131,6 +131,7 @@ def compute_fid_score(
     vae_scale_factor: float = SCALE_CONSTANT,
     mp_dtype=None,
     rank: int = 0,
+    fid_feature: int = 2048,
 ) -> float | None:
     """
     Compute FID between decoded val latents (real) and model-generated images (fake).
@@ -139,6 +140,11 @@ def compute_fid_score(
     image generation involves the sharded model. Real image collection and the
     metric computation itself are rank-0 only.
 
+    fid_feature controls the Inception layer used for statistics (64, 192, 768, 2048).
+    The scipy matrix square root in compute() scales as O(fid_feature³), so smaller
+    values are dramatically faster. For num_samples < 2048, use feature=64 or 192
+    — a 2048-dim covariance estimated from <2048 points is rank-deficient.
+
     Returns the FID scalar on rank 0, None on all other ranks.
     """
     from torchmetrics.image.fid import FrechetInceptionDistance
@@ -146,6 +152,13 @@ def compute_fid_score(
 
     is_master = (rank == 0)
     diff.model.eval()
+
+    if is_master and num_samples < fid_feature:
+        print(
+            f"[FID warning] num_samples ({num_samples}) < fid_feature ({fid_feature}). "
+            f"The covariance matrix will be rank-deficient and FID unreliable. "
+            f"Use --fid-feature 64 or increase --num-fid-samples."
+        )
 
     autocast_ctx = (
         torch.amp.autocast(device_type="cuda", dtype=mp_dtype)
@@ -157,7 +170,7 @@ def compute_fid_score(
     fid_metric = None
     if is_master:
         fid_metric = (
-            FrechetInceptionDistance(feature=2048, normalize=True)
+            FrechetInceptionDistance(feature=fid_feature, normalize=True)
             .to(device)
             .set_dtype(torch.float64)
         )

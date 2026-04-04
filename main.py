@@ -300,6 +300,7 @@ def main(args):
                     vae_scale_factor=SCALE_CONSTANT,
                     mp_dtype=mp_dtype if use_mp else None,
                     rank=local_rank,
+                    fid_feature=args.fid_feature,
                 )
                 if master_process and fid_score is not None:
                     print(f"FID at epoch {e + 1}: {fid_score:.4f}")
@@ -478,5 +479,9 @@ if __name__ == "__main__":
     parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")
     parser.add_argument("--num-fid-samples", type=int, default=2048, help="Number of real/fake image pairs for FID (>=2048 recommended)")
     parser.add_argument("--fid-batch-size", type=int, default=16, help="Batch size used when generating images for FID")
+    parser.add_argument("--fid-feature", type=int, default=2048, choices=[64, 192, 768, 2048],
+                        help="Inception feature layer for FID. scipy sqrtm cost is O(n³): "
+                             "64→instant, 192→fast, 768→slow, 2048→very slow. "
+                             "Use 64 or 192 when num-fid-samples < 2048.")
     
     main(parser.parse_args())
