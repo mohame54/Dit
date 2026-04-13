@@ -161,6 +161,10 @@ def main(args):
     
     # Create optimizer AFTER diff_net is defined
     opt_config = load_json("opt_config.json", env_vars=False)
+    if args.lr is not None:
+        opt_config['lr'] = args.lr
+        if master_process:
+            print(f"LR overridden via --lr: {args.lr}")
     # For DDP, the optimizer needs the unwrapped model's parameters
     model_for_opt = diff_net if use_fsdp else diff_net.module
     if args.use_moun:
@@ -480,6 +484,7 @@ if __name__ == "__main__":
 
     # Resume training
     parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
+    parser.add_argument("--lr", type=float, default=None, help="Override the learning rate from opt_config.json (useful when resuming)")
 
     # FID evaluation
     parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")

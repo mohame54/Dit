@@ -133,22 +133,6 @@ def compute_fid_score(
     rank: int = 0,
     fid_feature: int = 2048,
 ) -> float | None:
-    """
-    Compute FID between decoded val latents (real) and model-generated images (fake).
-
-    All ranks must call this function together when using FSDP, because the fake
-    image generation involves the sharded model. Real image collection and the
-    metric computation itself are rank-0 only.
-
-    ``rank`` must be the process global rank (``dist.get_rank()``)
-
-    fid_feature controls the Inception layer used for statistics (64, 192, 768, 2048).
-    The scipy matrix square root in compute() scales as O(fid_feature³), so smaller
-    values are dramatically faster. For num_samples < 2048, use feature=64 or 192
-    — a 2048-dim covariance estimated from <2048 points is rank-deficient.
-
-    Returns the FID scalar on rank 0, None on all other ranks.
-    """
     from torchmetrics.image.fid import FrechetInceptionDistance
     from torch.utils.data import DataLoader as _DataLoader
 
