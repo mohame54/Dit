@@ -176,6 +176,8 @@ def main(args):
         # Reset LR to initial config value, otherwise scheduler starts from decayed value
         for param_group in optim.param_groups:
             param_group['lr'] = opt_config['lr']
+            if "initial_lr" in param_group:
+                param_group['initial_lr'] = opt_config['lr']
     
     # Create learning rate scheduler (step-based, not epoch-based)
     scheduler = None
