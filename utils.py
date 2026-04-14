@@ -36,32 +36,32 @@ def download_checkpoint_from_hf(repo_id, checkpoint_dir, local_dir):
     
     os.makedirs(local_dir, exist_ok=True)
     
-    files_to_download = ["model.pt", "optim.pt", "ema.pt", "train_logs.txt", "val_logs.txt"]
+    required_files = ["model.pt"]
+    optional_files = ["optim.pt", "ema.pt", "train_logs.txt", "val_logs.txt"]
     
     print(f"Downloading checkpoint from {repo_id}/{checkpoint_dir} to {local_dir}...")
     
-    for filename in files_to_download:
+    for filename in required_files:
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=f"{checkpoint_dir}/{filename}",
+            local_dir=local_dir,
+        )
+        print(f"Downloaded {filename}")
+
+    for filename in optional_files:
         try:
             hf_hub_download(
                 repo_id=repo_id,
                 filename=f"{checkpoint_dir}/{filename}",
                 local_dir=local_dir,
-                local_dir_use_symlinks=False
             )
-            # hf_hub_download preserves directory structure, so we might need to move files
-            # if we want them directly in local_dir. 
-            # However, hf_hub_download with local_dir usually mirrors the repo structure.
-            # Let's adjust to be robust. 
-            
-            # If checkpoint_dir is "checkpoint_20", the file will be at local_dir/checkpoint_20/model.pt
-            # We want them at local_dir/model.pt for easier loading if possible, or just return the path
-            
+            print(f"Downloaded {filename}")
         except Exception as e:
-            print(f"Failed to download {filename}: {e}")
+            print(f"Optional file {filename} not found, skipping: {e}")
             
-    # Return the path where the files are actually located
-    # hf_hub_download downloads to local_dir/filename
-    # so if filename is checkpoint_20/model.pt, it's at local_dir/checkpoint_20/model.pt
+    # hf_hub_download with local_dir mirrors the repo structure:
+    # local_dir/checkpoint_dir/model.pt
     return os.path.join(local_dir, checkpoint_dir)
 
 class CifarDataset(Dataset):
