@@ -180,16 +180,16 @@ class DitBlock(nn.Module):
       super(DitBlock, self).__init__()
       self.norm1 = AdaNorm(config)
       self.norm2 = nn.LayerNorm(config.hidden_dim, 1e-6, False)
-    
+      self.drop = nn.Dropout(config.drop_rate)
       self.attn = DitAttention(config)
       self.mlp = DitMlp(config)
 
   def forward(self, hidden_states, c):
       norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, c)
-      attn_output = self.attn(norm_hidden_states)
+      attn_output = self.drop(self.attn(norm_hidden_states))
       attn_output = gate_msa.unsqueeze(1) * attn_output
       hidden_states = hidden_states + attn_output
-      hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(hidden_states), scale_mlp, shift_mlp))
+      hidden_states = hidden_states + gate_mlp.unsqueeze(1) * self.drop(self.mlp(modulate(self.norm2(hidden_states), scale_mlp, shift_mlp)))
       return hidden_states
 
 

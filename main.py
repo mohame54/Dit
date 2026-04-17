@@ -128,11 +128,16 @@ def main(args):
     if master_process:
         print("VAE loaded on all ranks for distributed generation")
     
+    # Load model architecture config
+    model_config = load_json(args.model_config, env_vars=False)
+    if master_process:
+        print(f"Model config loaded from: {args.model_config}")
+
     # Load model
     if use_fsdp:
-        diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path)
+        diff_net = load_fsdp_model(use_mp, mp_dtype, weights_path=weights_path, **model_config)
     else:
-        diff_net = load_ddp_model(use_mp, mp_dtype, weights_path=weights_path, device=device)
+        diff_net = load_ddp_model(use_mp, mp_dtype, weights_path=weights_path, device=device, **model_config)
     
     if master_process:
         num_params = sum(p.numel() for p in diff_net.parameters())
@@ -141,15 +146,15 @@ def main(args):
     # Create EMA model
     if use_fsdp:
         if ema_path is not None and os.path.exists(ema_path):
-            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path)
+            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=ema_path, **model_config)
         else:
-            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None)
+            ema_net = load_fsdp_model(use_mp, mp_dtype, weights_path=None, **model_config)
             copy_fsdp_model_state(diff_net, ema_net)
     else:
         if ema_path is not None and os.path.exists(ema_path):
-            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=ema_path, device=device)
+            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=ema_path, device=device, **model_config)
         else:
-            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=None, device=device)
+            ema_net = load_ddp_model(use_mp, mp_dtype, weights_path=None, device=device, **model_config)
             with torch.no_grad():
                 ema_state = diff_net.module.state_dict()
                 ema_net.module.load_state_dict(ema_state)
@@ -369,7 +374,7 @@ def main(args):
             
             try:
                 if should_generate:
-                    conditions_labels = ["bird", "cat", "dog"] * 2
+                    conditions_labels = ["bird", "cat", "dog"] * 3
 
                     diff.model.eval()
                     with torch.no_grad():
@@ -454,6 +459,7 @@ def str_to_bool(v):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model-config", type=str, default="model_config.json", help="Path to model architecture config JSON")
     parser.add_argument("--mp-dt", type=str, default="float16")  
     parser.add_argument("--vae-model-id", type=str, default="stabilityai/sdxl-vae")
     parser.add_argument("--epochs", type=int)

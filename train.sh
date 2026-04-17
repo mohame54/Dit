@@ -27,7 +27,7 @@ CUDA_VERSION="cu121"          # change to cu118 / cu124 / cu126 etc. as needed
 NUM_GPUS=2
 EPOCHS=1000
 CUR_EPOCHS=0
-TRAIN_BATCH_SZ=64
+TRAIN_BATCH_SZ=128
 VAL_BATCH_SZ=16
 MP_DT="bfloat16"
 LOSS_TYPE="mse_loss"
@@ -50,6 +50,7 @@ CHECKPOINTS_DIR="checkpoints"
 LOGS_DIR="logs"
 RESUME_DIR=""
 LR=""                 # empty = use value from scripts/opt_config.json
+RUN_NAME=""           # empty = use CHECKPOINTS_DIR/LOGS_DIR as-is; set to scope under a subfolder (e.g. v2)
 
 HF_TOKEN="${HF_TOKEN:-}"
 
@@ -97,6 +98,7 @@ Paths:
 Resume:
   --resume DIR            Checkpoint folder name  (e.g. checkpoint_300)
   --lr FLOAT              Override learning rate  (e.g. 5e-5); default: value in scripts/opt_config.json
+  --run-name NAME         Scope checkpoints/logs under a subfolder (e.g. v2 → checkpoints/v2/, logs/v2/)
 EOF
     exit 0
 }
@@ -139,12 +141,19 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --lr)                  LR="$2";                 shift 2 ;;
+        --run-name)            RUN_NAME="$2";           shift 2 ;;
         *)
             echo "Unknown option: $1  (run with --help to see all options)"
             exit 1
             ;;
     esac
 done
+
+# Apply run name scoping after all flags are parsed
+if [[ -n "$RUN_NAME" ]]; then
+    CHECKPOINTS_DIR="${CHECKPOINTS_DIR}/${RUN_NAME}"
+    LOGS_DIR="${LOGS_DIR}/${RUN_NAME}"
+fi
 
 # ─────────────────────────────────────────────────────────────
 # 1. Clone repository (skip if already inside the repo)
@@ -240,6 +249,8 @@ printf "   %-20s %s\n" "Val batch:"     "$VAL_BATCH_SZ"
 printf "   %-20s %s\n" "Scheduler:"     "$SCHEDULER_TYPE (enabled=$USE_SCHEDULER)"
 printf "   %-20s %s\n" "FID freq:"      "$FID_FREQ"
 printf "   %-20s %s\n" "Push to Hub:"   "$PUSH_HUB"
+printf "   %-20s %s\n" "Checkpoints:"   "$CHECKPOINTS_DIR"
+printf "   %-20s %s\n" "Logs:"          "$LOGS_DIR"
 if [[ -n "$RESUME_DIR" ]]; then
     printf "   %-20s %s\n" "Resuming from:" "$RESUME_DIR  (cur_epochs=$CUR_EPOCHS)"
 fi

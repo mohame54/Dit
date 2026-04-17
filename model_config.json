@@ -1,0 +1,23 @@
+{
+  "freq_dim": 256,
+  "hidden_dim": 512,
+  "num_blocks": 12,
+  "bias": true,
+  "qkv_bias": false,
+  "num_classes": 3,
+  "tim_mlp_dim": 1,
+  "max_freq": 10000,
+  "num_heads": 8,
+  "patch_size": 2,
+  "mlp_fac": 4,
+  "img_size": 32,
+  "in_chs": 4,
+  "out_chs": 4,
+  "drop_rate": 0.1,
+  "add_conv_final": false,
+  "add_norm_embd": false,
+  "use_gate_mlp": true,
+  "mlp_bias": false,
+  "flip_sin_to_cos": true,
+  "label_drop_prob": 0.1
+}
