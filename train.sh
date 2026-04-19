@@ -28,7 +28,7 @@ NUM_GPUS=2
 EPOCHS=1000
 CUR_EPOCHS=0
 TRAIN_BATCH_SZ=128
-VAL_BATCH_SZ=16
+VAL_BATCH_SZ=128
 MP_DT="bfloat16"
 LOSS_TYPE="mse_loss"
 DIST_MODE="ddp"
@@ -197,7 +197,7 @@ fi
 # ─────────────────────────────────────────────────────────────
 # 4a. Download latent_vector_mapping.csv (skip if already uploaded)
 # ─────────────────────────────────────────────────────────────
-if [[ ! -f "latent_vector_mapping.csv" ]]; then
+if [[ ! -f "content/latent_vector_mapping.csv" ]]; then
     if [[ -n "$GDRIVE_CSV_ID" ]]; then
         echo "==> Downloading latent_vector_mapping.csv from Google Drive..."
         gdown "https://drive.google.com/uc?id=${GDRIVE_CSV_ID}" -O latent_vector_mapping.csv

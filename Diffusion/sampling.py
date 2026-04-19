@@ -75,7 +75,9 @@ class RFDiffusion(ODSolversMixin):
         self.model = model
 
     def to_t_inds(self, t: torch.Tensor):
-        t_inds = (t * float(self.n_steps)).to(torch.int32)
+        # Clamp to [0, n_steps-1] so inference (which starts at t=1.0) never
+        # produces index n_steps, which is outside the training distribution.
+        t_inds = (t * float(self.n_steps)).to(torch.int32).clamp(0, self.n_steps - 1)
         return t_inds.to(t.device)
      
     def rectified_flow_loss(
@@ -154,7 +156,10 @@ class RFDiffusion(ODSolversMixin):
            
         for i in range(steps - 1):  # Stop one step before to avoid index error
             t = t_vals[i]
-            t_batch = torch.full((x.shape[0],), fill_value=t, device=device)
+            # Use .item() so torch.full receives a Python scalar, not a 0-d
+            # tensor. A 0-d tensor as fill_value triggers a value guard under
+            # torch.compile causing a retrace for every unique timestep.
+            t_batch = torch.full((x.shape[0],), fill_value=t.item(), device=device)
             t_batch = self.to_t_inds(t_batch)
 
             v = model_fn(x, t_batch)
@@ -162,7 +167,7 @@ class RFDiffusion(ODSolversMixin):
                 x = self.euler_step(x, dt, v)
 
             elif self.sampling_method == "rk":
-                t_batch_next = torch.full((x.shape[0],), fill_value=t_vals[i + 1], device=device)
+                t_batch_next = torch.full((x.shape[0],), fill_value=t_vals[i + 1].item(), device=device)
                 t_batch_next = self.to_t_inds(t_batch_next)
                 x = self.rk2_step(x, dt, v, t_batch_next, model_fn)
             else:

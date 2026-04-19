@@ -200,6 +200,10 @@ class DitModel(nn.Module):
       self.patch_embd = PatchEmbed(config)
       self.time_embd  = DitTimeEmbd(config)
       self.pos_embd = nn.Parameter(torch.randn(1, self.patch_embd.num_patches, config.hidden_dim))
+      # Store grid side-length as a plain int so unpatchify never calls
+      # int(x.size(1)**0.5) inside the compiled region, which can break
+      # torch.compile dynamic-shape tracing.
+      self._grid_h: int = config.img_size // config.patch_size
       self.norm_final = nn.LayerNorm(config.hidden_dim, 1e-6, False)
       self.patch_size = config.patch_size
       self.out_ch = config.out_chs
@@ -223,7 +227,7 @@ class DitModel(nn.Module):
 
   def unpactchify(self, x):
       bs = x.size(0)
-      h = int(x.size(1) ** 0.5)
+      h = self._grid_h  # compile-safe constant, no int(tensor**0.5) at runtime
       x = x.view(bs, h, h, self.patch_size, self.patch_size, self.out_ch)
       x = torch.einsum('nhwpqc->nchpwq', x)
       x = x.reshape(bs, -1, h * self.patch_size, h * self.patch_size)

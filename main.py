@@ -127,6 +127,17 @@ def main(args):
     
     if master_process:
         print("VAE loaded on all ranks for distributed generation")
+
+    if args.compile:
+        if not hasattr(torch, 'compile'):
+            if master_process:
+                print("Warning: torch.compile not available (requires PyTorch >= 2.0). Skipping VAE compilation.")
+        else:
+            # dynamic=True uses symbolic batch dims so different batch sizes
+            # (train / val / generation / FID) never trigger a retrace.
+            vae = torch.compile(vae, mode=args.compile_mode, dynamic=True)
+            if master_process:
+                print(f"VAE compiled with torch.compile (mode={args.compile_mode}, dynamic=True)")
     
     # Load model architecture config
     model_config = load_json(args.model_config, env_vars=False)
@@ -207,7 +218,29 @@ def main(args):
             print(f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, resuming from step {max(cur_steps, 0)})")
     
     barrier()
-    
+
+    # Keep pre-compile references so FSDP/DDP save utilities always receive
+    # the correctly-typed wrappers (torch.compile adds an extra layer).
+    diff_net_for_save = diff_net
+    ema_net_for_save = ema_net
+
+    if args.compile:
+        if not hasattr(torch, 'compile'):
+            if master_process:
+                print("Warning: torch.compile not available (requires PyTorch >= 2.0). Skipping model compilation.")
+        else:
+            if master_process:
+                print(f"Compiling diff_net and ema_net with torch.compile (mode={args.compile_mode}, dynamic=True)...")
+                print("  Tip: set TORCH_LOGS=recompiles to see any unexpected recompilations at runtime.")
+            # dynamic=True: symbolic batch dimension prevents retracing when the
+            # batch size changes across train / val / generation / FID calls.
+            # train/eval mode switches still produce two separate cached graphs
+            # (one each), which is unavoidable but only happens once per mode.
+            diff_net = torch.compile(diff_net, mode=args.compile_mode, dynamic=True)
+            ema_net = torch.compile(ema_net, mode=args.compile_mode, dynamic=True)
+            if master_process:
+                print("Models compiled successfully")
+
     rf_sch_config = load_json("rc_sch_config.json", env_vars=False)
     diff = RFDiffusion(
         model=diff_net,
@@ -347,12 +380,12 @@ def main(args):
             weights_path = os.path.join(dir_path, "model.pt")
             
             if use_fsdp:
-                save_model_fsdp(diff_net, weights_path)
-                save_model_fsdp(ema_net, ema_path)
-                save_optimizer_fsdp(diff_net, optim, opt_path)
+                save_model_fsdp(diff_net_for_save, weights_path)
+                save_model_fsdp(ema_net_for_save, ema_path)
+                save_optimizer_fsdp(diff_net_for_save, optim, opt_path)
             else:
-                save_model_ddp(diff_net, weights_path)
-                save_model_ddp(ema_net, ema_path)
+                save_model_ddp(diff_net_for_save, weights_path)
+                save_model_ddp(ema_net_for_save, ema_path)
                 save_optimizer_ddp(optim, opt_path)
             
             # Save logs with checkpoint
@@ -374,7 +407,7 @@ def main(args):
             
             try:
                 if should_generate:
-                    conditions_labels = ["bird", "cat", "dog"] * 3
+                    conditions_labels = ["bird", "cat", "dog"] * 2
 
                     diff.model.eval()
                     with torch.no_grad():
@@ -459,7 +492,6 @@ def str_to_bool(v):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-config", type=str, default="model_config.json", help="Path to model architecture config JSON")
     parser.add_argument("--mp-dt", type=str, default="float16")  
     parser.add_argument("--vae-model-id", type=str, default="stabilityai/sdxl-vae")
     parser.add_argument("--epochs", type=int)
@@ -475,7 +507,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir-path", type=str, default="data")
     parser.add_argument("--push-hub", type=str_to_bool, default=True)
     parser.add_argument("--num-gen-steps", type=int, default=64, help="Number of diffusion sampling steps")
-    
+    parser.add_argument("--model-config", type=str, default="model_config.json", help="Path to the model architecture JSON config file")
+
     # Distributed mode
     parser.add_argument("--dist-mode", type=str, default="ddp", choices=["fsdp", "ddp"], help="Distributed training mode")
     
@@ -491,6 +524,10 @@ if __name__ == "__main__":
     # Resume training
     parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
     parser.add_argument("--lr", type=float, default=None, help="Override the learning rate from opt_config.json (useful when resuming)")
+
+    # torch.compile
+    parser.add_argument("--compile", type=str_to_bool, default=False, help="Compile models with torch.compile for faster training and inference (requires PyTorch >= 2.0)")
+    parser.add_argument("--compile-mode", type=str, default="reduce-overhead", choices=["default", "reduce-overhead", "max-autotune"], help="torch.compile mode: 'default' balances compile time and speed, 'reduce-overhead' minimises kernel-launch overhead (good for fixed shapes), 'max-autotune' maximises throughput at the cost of a longer initial compile")
 
     # FID evaluation
     parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")
