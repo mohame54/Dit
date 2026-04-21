@@ -62,8 +62,8 @@ def main(args):
     train_ds = CifarDataset(train_df, base_imgs_path=images_dir_pth, val=False)
     val_ds = CifarDataset(val_df, base_imgs_path=images_dir_pth, val=False)
 
-    train_loader = load_data_loader_ddp(train_ds, ddp_world_size, ddp_rank, batch_size=args.train_batch_sz, shuffle=True)
-    val_loader = load_data_loader_ddp(val_ds, ddp_world_size, ddp_rank, batch_size=args.val_batch_sz, shuffle=False)
+    train_loader = load_data_loader_ddp(train_ds, ddp_world_size, ddp_rank, batch_size=args.train_batch_sz, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    val_loader = load_data_loader_ddp(val_ds, ddp_world_size, ddp_rank, batch_size=args.val_batch_sz, shuffle=False, num_workers=args.num_workers)
 
     use_mp = args.mp_dt.lower() != "none"
     mp_dtype = None
@@ -79,7 +79,25 @@ def main(args):
         ema_path = os.path.join(weights_dir_path, "ema.pt")
         opt_path = os.path.join(weights_dir_path, "optim.pt")
     
-    if args.resume_dir:
+    if args.resume_local:
+        # Resume directly from a local directory — no HF download
+        resume_weights_dir = args.resume_local
+        weights_path = os.path.join(resume_weights_dir, "model.pt")
+        ema_path = os.path.join(resume_weights_dir, "ema.pt")
+        opt_path = os.path.join(resume_weights_dir, "optim.pt")
+
+        if master_process:
+            print(f"Resuming locally from: {resume_weights_dir}")
+            os.makedirs(args.logs_save_dir, exist_ok=True)
+            for log_name in ("train_logs.txt", "val_logs.txt", "fid_logs.txt"):
+                src = os.path.join(resume_weights_dir, log_name)
+                if os.path.exists(src):
+                    print(f"Resuming {log_name} from {src}")
+                    shutil.copy(src, os.path.join(args.logs_save_dir, log_name))
+
+        barrier()
+
+    elif args.resume_dir:
         if master_process:
             # Only master process downloads to avoid race conditions
             # usage: download_checkpoint_from_hf(repo_id, checkpoint_dir, local_dir)
@@ -108,9 +126,6 @@ def main(args):
         
         # Resume logs if they exist
         if master_process:
-            train_logs_src = os.path.join(downloaded_weights_dir, "train_logs.txt")
-            val_logs_src = os.path.join(downloaded_weights_dir, "val_logs.txt")
-            
             os.makedirs(args.logs_save_dir, exist_ok=True)
             
             for log_name in ("train_logs.txt", "val_logs.txt", "fid_logs.txt"):
@@ -505,6 +520,7 @@ if __name__ == "__main__":
     parser.add_argument("--epoch-save-freq", type=int, default=20)
     parser.add_argument("--logs-save-dir", type=str, default="logs")
     parser.add_argument("--data-dir-path", type=str, default="data")
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader worker processes per GPU (increase if GPU idles waiting for data)")
     parser.add_argument("--push-hub", type=str_to_bool, default=True)
     parser.add_argument("--num-gen-steps", type=int, default=64, help="Number of diffusion sampling steps")
     parser.add_argument("--model-config", type=str, default="model_config.json", help="Path to the model architecture JSON config file")
@@ -522,7 +538,8 @@ if __name__ == "__main__":
     parser.add_argument("--save-best", type=str_to_bool, default=False, help="Save checkpoint when achieving best validation loss")
 
     # Resume training
-    parser.add_argument("--resume-dir", type=str, help="Directory inside the repo containing the checkpoint")
+    parser.add_argument("--resume-dir", type=str, help="Directory inside the HF Hub repo to download and resume from")
+    parser.add_argument("--resume-local", type=str, default="", help="Local checkpoint directory to resume from (skips HF Hub download)")
     parser.add_argument("--lr", type=float, default=None, help="Override the learning rate from opt_config.json (useful when resuming)")
 
     # torch.compile

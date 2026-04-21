@@ -91,14 +91,18 @@ class CifarDataset(Dataset):
       return img, label + 1
 
 
-def load_data_loader_ddp(dataset, world_size, rank,batch_size, shuffle=True, num_workers=2, pin_memory=True):
+def load_data_loader_ddp(dataset, world_size, rank, batch_size, shuffle=True, num_workers=4,
+                         pin_memory=True, drop_last=False, prefetch_factor=4):
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=shuffle)
     return DataLoader(
         dataset,
         batch_size=batch_size,
         sampler=sampler,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
     )
 
 

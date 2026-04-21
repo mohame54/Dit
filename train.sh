@@ -49,8 +49,10 @@ DATA_DIR="content"
 CHECKPOINTS_DIR="checkpoints"
 LOGS_DIR="logs"
 RESUME_DIR=""
+RESUME_LOCAL=""       # local checkpoint path; skips HF Hub download (e.g. checkpoints/v2/checkpoint_400)
 LR=""                 # empty = use value from scripts/opt_config.json
 RUN_NAME=""           # empty = use CHECKPOINTS_DIR/LOGS_DIR as-is; set to scope under a subfolder (e.g. v2)
+NUM_WORKERS=4         # DataLoader workers per GPU; increase if GPU idles waiting for data
 
 HF_TOKEN="${HF_TOKEN:-}"
 
@@ -81,6 +83,7 @@ Training:
   --use-moun BOOL         Use Moun optimizer      (default: $USE_MOUN)
   --push-hub BOOL         Push to HF Hub          (default: $PUSH_HUB)
   --use-scheduler BOOL    Use LR scheduler        (default: $USE_SCHEDULER)
+  --no-scheduler          Disable LR scheduler    (sets --use-scheduler False)
   --scheduler-type TYPE   cosine | step           (default: $SCHEDULER_TYPE)
   --save-best BOOL        Save best ckpt          (default: $SAVE_BEST)
 
@@ -96,9 +99,11 @@ Paths:
   --logs-save-dir PATH    Logs directory          (default: $LOGS_DIR)
 
 Resume:
-  --resume DIR            Checkpoint folder name  (e.g. checkpoint_300)
+  --resume DIR            HF Hub checkpoint folder name  (e.g. checkpoint_300) – downloads from Hub
+  --resume-local PATH     Local checkpoint directory     (e.g. checkpoints/v2/checkpoint_400) – no download
   --lr FLOAT              Override learning rate  (e.g. 5e-5); default: value in scripts/opt_config.json
   --run-name NAME         Scope checkpoints/logs under a subfolder (e.g. v2 → checkpoints/v2/, logs/v2/)
+  --num-workers N         DataLoader workers per GPU     (default: $NUM_WORKERS)
 EOF
     exit 0
 }
@@ -122,6 +127,7 @@ while [[ $# -gt 0 ]]; do
         --use-moun)            USE_MOUN="$2";           shift 2 ;;
         --push-hub)            PUSH_HUB="$2";           shift 2 ;;
         --use-scheduler)       USE_SCHEDULER="$2";      shift 2 ;;
+        --no-scheduler)        USE_SCHEDULER="False";   shift 1 ;;
         --scheduler-type)      SCHEDULER_TYPE="$2";     shift 2 ;;
         --save-best)           SAVE_BEST="$2";          shift 2 ;;
         --fid-freq)            FID_FREQ="$2";           shift 2 ;;
@@ -140,8 +146,18 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --resume-local)
+            RESUME_LOCAL="$2"
+            # Auto-derive cur-epochs from folder name if not explicitly set
+            # e.g. checkpoints/v2/checkpoint_400 → 400
+            if [[ "$CUR_EPOCHS" == "0" ]]; then
+                CUR_EPOCHS="${RESUME_LOCAL##*_}"
+            fi
+            shift 2
+            ;;
         --lr)                  LR="$2";                 shift 2 ;;
         --run-name)            RUN_NAME="$2";           shift 2 ;;
+        --num-workers)         NUM_WORKERS="$2";        shift 2 ;;
         *)
             echo "Unknown option: $1  (run with --help to see all options)"
             exit 1
@@ -261,7 +277,9 @@ echo "============================================================"
 echo ""
 
 RESUME_ARGS=""
-if [[ -n "$RESUME_DIR" ]]; then
+if [[ -n "$RESUME_LOCAL" ]]; then
+    RESUME_ARGS="--resume-local ${RESUME_LOCAL} --cur-epochs ${CUR_EPOCHS}"
+elif [[ -n "$RESUME_DIR" ]]; then
     RESUME_ARGS="--resume-dir ${RESUME_DIR} --cur-epochs ${CUR_EPOCHS}"
 fi
 
@@ -270,27 +288,55 @@ if [[ -n "$LR" ]]; then
     LR_ARGS="--lr ${LR}"
 fi
 
-torchrun --nproc_per_node="$NUM_GPUS" main.py \
-    --epochs            "$EPOCHS"           \
-    --train-batch-sz    "$TRAIN_BATCH_SZ"   \
-    --val-batch-sz      "$VAL_BATCH_SZ"     \
-    --data-dir-path     "$DATA_DIR"         \
-    --dir-path-save     "$CHECKPOINTS_DIR"  \
-    --logs-save-dir     "$LOGS_DIR"         \
-    --epoch-save-freq   "$EPOCH_SAVE_FREQ"  \
-    --num-gen-steps     "$NUM_GEN_STEPS"    \
-    --mp-dt             "$MP_DT"            \
-    --vae-model-id      "$VAE_MODEL_ID"     \
-    --use-moun          "$USE_MOUN"         \
-    --loss-type         "$LOSS_TYPE"        \
-    --push-hub          "$PUSH_HUB"         \
-    --dist-mode         "$DIST_MODE"        \
-    --use-scheduler     "$USE_SCHEDULER"    \
-    --scheduler-type    "$SCHEDULER_TYPE"   \
-    --save-best         "$SAVE_BEST"        \
-    --fid-freq          "$FID_FREQ"         \
-    --fid-batch-size    "$FID_BATCH_SIZE"   \
-    --num-fid-samples   "$NUM_FID_SAMPLES"  \
-    --fid-feature       "$FID_FEATURE"      \
-    $RESUME_ARGS \
-    $LR_ARGS
+if [[ "$NUM_GPUS" -eq 1 ]]; then
+    python3 main_single_gpu.py \
+        --epochs            "$EPOCHS"           \
+        --train-batch-sz    "$TRAIN_BATCH_SZ"   \
+        --val-batch-sz      "$VAL_BATCH_SZ"     \
+        --data-dir-path     "$DATA_DIR"         \
+        --dir-path-save     "$CHECKPOINTS_DIR"  \
+        --logs-save-dir     "$LOGS_DIR"         \
+        --epoch-save-freq   "$EPOCH_SAVE_FREQ"  \
+        --num-gen-steps     "$NUM_GEN_STEPS"    \
+        --mp-dt             "$MP_DT"            \
+        --vae-model-id      "$VAE_MODEL_ID"     \
+        --use-moun          "$USE_MOUN"         \
+        --loss-type         "$LOSS_TYPE"        \
+        --push-hub          "$PUSH_HUB"         \
+        --use-scheduler     "$USE_SCHEDULER"    \
+        --scheduler-type    "$SCHEDULER_TYPE"   \
+        --save-best         "$SAVE_BEST"        \
+        --fid-freq          "$FID_FREQ"         \
+        --fid-batch-size    "$FID_BATCH_SIZE"   \
+        --num-fid-samples   "$NUM_FID_SAMPLES"  \
+        --fid-feature       "$FID_FEATURE"      \
+        --num-workers       "$NUM_WORKERS"      \
+        $RESUME_ARGS \
+        $LR_ARGS
+else
+    torchrun --nproc_per_node="$NUM_GPUS" main.py \
+        --epochs            "$EPOCHS"           \
+        --train-batch-sz    "$TRAIN_BATCH_SZ"   \
+        --val-batch-sz      "$VAL_BATCH_SZ"     \
+        --data-dir-path     "$DATA_DIR"         \
+        --dir-path-save     "$CHECKPOINTS_DIR"  \
+        --logs-save-dir     "$LOGS_DIR"         \
+        --epoch-save-freq   "$EPOCH_SAVE_FREQ"  \
+        --num-gen-steps     "$NUM_GEN_STEPS"    \
+        --mp-dt             "$MP_DT"            \
+        --vae-model-id      "$VAE_MODEL_ID"     \
+        --use-moun          "$USE_MOUN"         \
+        --loss-type         "$LOSS_TYPE"        \
+        --push-hub          "$PUSH_HUB"         \
+        --dist-mode         "$DIST_MODE"        \
+        --use-scheduler     "$USE_SCHEDULER"    \
+        --scheduler-type    "$SCHEDULER_TYPE"   \
+        --save-best         "$SAVE_BEST"        \
+        --fid-freq          "$FID_FREQ"         \
+        --fid-batch-size    "$FID_BATCH_SIZE"   \
+        --num-fid-samples   "$NUM_FID_SAMPLES"  \
+        --fid-feature       "$FID_FEATURE"      \
+        --num-workers       "$NUM_WORKERS"      \
+        $RESUME_ARGS \
+        $LR_ARGS
+fi

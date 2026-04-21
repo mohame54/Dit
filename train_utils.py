@@ -20,6 +20,7 @@ def train_epoch(
     mp_dtype=torch.float16,
     scheduler=None,
     use_fsdp=True,
+    log_every=50,
 ):
     diff.model.train()
     losses = []
@@ -77,18 +78,23 @@ def train_epoch(
             if ema_model is not None:
                 update_ema_model(diff.model, ema_model, ema_decay)
         
-        loss_scalar = loss.detach() * grad_accum_steps
-        dist.all_reduce(loss_scalar, op=dist.ReduceOp.AVG)
-        
+        # Avoid an all_reduce every step — that is a hard sync barrier that stalls
+        # the GPU pipeline. Instead, log the local loss value and only synchronize
+        # across ranks every `log_every` steps for a more accurate running average.
+        loss_scalar = (loss.detach() * grad_accum_steps).item()
+
         if rank == 0:
-            losses.append(loss_scalar.item())
-            loop.set_postfix({"loss": f"{sum(losses)/len(losses):.4f}"})
+            losses.append(loss_scalar)
+
+        if rank == 0 and (i + 1) % log_every == 0:
+            avg = sum(losses[-log_every:]) / len(losses[-log_every:])
+            loop.set_postfix({"loss": f"{avg:.4f}"})
     
     return losses if rank == 0 else []
 
 
 @torch.no_grad()
-def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss", mp_dtype=None):
+def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss", mp_dtype=None, distributed: bool = True):
     diff.model.eval()
     losses = []
     loop = tqdm(val_ds, desc="Validation") if rank == 0 else val_ds
@@ -102,7 +108,8 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss", mp_dtype=No
             loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
         
         # Synchronize loss across all ranks
-        dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        if distributed:
+            dist.all_reduce(loss, op=dist.ReduceOp.AVG)
         
         # All ranks compute, but only rank 0 logs
         if rank == 0:
@@ -132,6 +139,7 @@ def compute_fid_score(
     mp_dtype=None,
     rank: int = 0,
     fid_feature: int = 2048,
+    distributed: bool = True,
 ) -> float | None:
     from torchmetrics.image.fid import FrechetInceptionDistance
     from torch.utils.data import DataLoader as _DataLoader
@@ -193,11 +201,16 @@ def compute_fid_score(
     finally:
         # Always synchronize so non-master ranks don't hang waiting for this barrier
         # if rank 0 raised an exception during real-image processing.
-        dist.barrier()
+        if distributed:
+            dist.barrier()
 
-    dist.all_reduce(_real_error, op=dist.ReduceOp.MAX)
-    if _real_error[0].item() > 0:
-        raise RuntimeError("FID real-image collection failed on master rank; aborting all ranks.")
+    if distributed:
+        dist.all_reduce(_real_error, op=dist.ReduceOp.MAX)
+        if _real_error[0].item() > 0:
+            raise RuntimeError("FID real-image collection failed on master rank; aborting all ranks.")
+    else:
+        if _real_error[0].item() > 0:
+            raise RuntimeError("FID real-image collection failed.")
 
     # ── Fake images (all ranks participate — model may be FSDP-sharded) ────────
     labels_cycle = (gen_labels * (num_samples // len(gen_labels) + 1))[:num_samples]
