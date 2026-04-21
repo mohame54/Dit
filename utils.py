@@ -4,6 +4,7 @@ import torch
 import random
 import numpy as np
 from PIL import Image
+from torch import nn
 from torch.utils.data import DataLoader, DistributedSampler
 from diffusers.models import AutoencoderKL
 from torch.utils.data import Dataset
@@ -15,6 +16,148 @@ from huggingface_hub.hf_api import HfFolder
 
 
 SCALE_CONSTANT = 0.13025
+
+
+def enable_perf_flags(allow_tf32=True, cudnn_benchmark=True, matmul_precision="high"):
+    if allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    if cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+    if matmul_precision is not None:
+        try:
+            torch.set_float32_matmul_precision(matmul_precision)
+        except Exception:
+            pass
+
+
+def _zero_init_(module):
+    if hasattr(module, "weight") and module.weight is not None:
+        nn.init.zeros_(module.weight)
+    if hasattr(module, "bias") and module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def dit_init_weights(model, pos_embd_std=0.02, verbose=False):
+    """DiT-style initialization (the trick from the DiT paper).
+
+    1) Xavier-uniform on every nn.Linear weight, zero bias.
+    2) Zero-init the AdaLN modulation Linear (the last Linear inside any
+       module whose class name is 'AdaNorm', accessed via its `.proj`),
+       so each transformer block starts as the identity function.
+    3) Zero-init `model.final_add_norm` (its last Linear) and `model.lin_final`,
+       so the network's initial output is zero.
+    4) Init `model.pos_embd` (raw nn.Parameter) with Normal(0, pos_embd_std)
+       instead of the much-too-large default Normal(0, 1).
+    """
+    n_xavier = 0
+    for m in model.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+            n_xavier += 1
+
+    n_adanorm_zeroed = 0
+    for m in model.modules():
+        if m.__class__.__name__ == "AdaNorm" and hasattr(m, "proj"):
+            last = m.proj[-1] if isinstance(m.proj, nn.Sequential) else m.proj
+            _zero_init_(last)
+            n_adanorm_zeroed += 1
+
+    if hasattr(model, "final_add_norm"):
+        last = (
+            model.final_add_norm[-1]
+            if isinstance(model.final_add_norm, nn.Sequential)
+            else model.final_add_norm
+        )
+        _zero_init_(last)
+
+    if hasattr(model, "lin_final"):
+        _zero_init_(model.lin_final)
+
+    if hasattr(model, "pos_embd") and isinstance(model.pos_embd, nn.Parameter):
+        nn.init.normal_(model.pos_embd, std=pos_embd_std)
+
+    if verbose:
+        print(
+            f"[dit_init_weights] xavier_init: {n_xavier} Linear layers, "
+            f"zero-init: {n_adanorm_zeroed} AdaNorm + final_add_norm + lin_final, "
+            f"pos_embd ~ Normal(0, {pos_embd_std})"
+        )
+
+
+def build_warmup_cosine_scheduler(
+    optim, total_steps, warmup_steps=0, min_lr=0.0, last_step=-1, start_factor=1e-3
+):
+    """Linear warmup followed by cosine decay.
+
+    If `warmup_steps <= 0`, falls back to a plain CosineAnnealingLR (drop-in
+    replacement). When resuming, pass `last_step` = number of optimizer steps
+    already completed - 1 (matching PyTorch's `last_epoch` convention).
+    """
+    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+
+    if warmup_steps <= 0:
+        return CosineAnnealingLR(
+            optim, T_max=total_steps, eta_min=min_lr, last_epoch=last_step
+        )
+
+    warmup = LinearLR(
+        optim, start_factor=start_factor, end_factor=1.0, total_iters=warmup_steps
+    )
+    cosine = CosineAnnealingLR(
+        optim, T_max=max(1, total_steps - warmup_steps), eta_min=min_lr
+    )
+    sched = SequentialLR(
+        optim, schedulers=[warmup, cosine], milestones=[warmup_steps]
+    )
+
+    # SequentialLR doesn't honour `last_epoch` in its constructor reliably,
+    # so fast-forward manually when resuming a run.
+    if last_step > 0:
+        for _ in range(last_step + 1):
+            sched.step()
+    return sched
+
+
+def get_ema_decay(step, base_decay=0.9999, warmup=2000):
+    if warmup <= 0:
+        return base_decay
+    return min(base_decay, (1.0 + step) / (10.0 + step))
+
+
+def split_params_for_decay(model, verbose=False):
+    decay, no_decay = [], []
+    decay_names, no_decay_names = [], []
+    seen = set()
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        pid = id(p)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if p.ndim <= 1 or n.endswith(".bias"):
+            no_decay.append(p)
+            no_decay_names.append(n)
+        else:
+            decay.append(p)
+            decay_names.append(n)
+
+    if verbose:
+        print(f"[split_params_for_decay] decay={len(decay)} no_decay={len(no_decay)}")
+        print(f"  decay e.g.: {decay_names[:5]}")
+        print(f"  no_decay e.g.: {no_decay_names[:5]}")
+    return decay, no_decay
+
+
+def build_adamw_param_groups(model, weight_decay, verbose=False):
+    decay, no_decay = split_params_for_decay(model, verbose=verbose)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
 
 def load_hf_api():
    HfFolder.save_token(os.getenv("HF_TOKEN"))

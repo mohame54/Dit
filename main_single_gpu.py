@@ -5,7 +5,7 @@ import torch
 import argparse
 import traceback
 import pandas as pd
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
 from train_utils import train_epoch, val_epoch, compute_fid_score
@@ -17,6 +17,9 @@ from utils import (
     images_to_grid,
     set_seed,
     download_checkpoint_from_hf,
+    build_adamw_param_groups,
+    build_warmup_cosine_scheduler,
+    enable_perf_flags,
     SCALE_CONSTANT,
 )
 from Diffusion import RFDiffusion
@@ -32,6 +35,7 @@ from opt import DualOpt
 def main(args):
     assert torch.cuda.is_available(), "CUDA is required for training"
     set_seed()
+    enable_perf_flags()
 
     device = torch.device("cuda:0")
     master_process = True
@@ -147,13 +151,23 @@ def main(args):
     if args.lr is not None:
         opt_config["lr"] = args.lr
         print(f"LR overridden via --lr: {args.lr}")
+    if args.warmup_steps is not None:
+        opt_config["warmup_steps"] = args.warmup_steps
+        print(f"Warmup steps overridden via --warmup-steps: {args.warmup_steps}")
 
     model_for_opt = diff_net
     if args.use_moun:
         optim = DualOpt(model_for_opt, lr=opt_config["lr"], weight_decay=opt_config["weight_decay"])
     else:
+        param_groups = build_adamw_param_groups(
+            model_for_opt, weight_decay=opt_config["weight_decay"], verbose=True
+        )
+        betas = tuple(opt_config.get("betas", (0.9, 0.95)))
         optim = torch.optim.AdamW(
-            model_for_opt.parameters(), lr=opt_config["lr"], weight_decay=opt_config["weight_decay"]
+            param_groups,
+            lr=opt_config["lr"],
+            betas=betas,
+            fused=torch.cuda.is_available(),
         )
 
     if opt_path is not None and os.path.exists(opt_path):
@@ -170,12 +184,14 @@ def main(args):
 
     if args.use_scheduler:
         last_step = cur_steps - 1
+        warmup_steps = int(opt_config.get("warmup_steps", 0))
         if args.scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(
+            scheduler = build_warmup_cosine_scheduler(
                 optim,
-                T_max=total_steps,
-                eta_min=opt_config.get("min_lr", 8e-6),
-                last_epoch=last_step,
+                total_steps=total_steps,
+                warmup_steps=warmup_steps,
+                min_lr=opt_config.get("min_lr", 8e-6),
+                last_step=last_step,
             )
         elif args.scheduler_type == "step":
             scheduler = StepLR(
@@ -185,7 +201,8 @@ def main(args):
                 last_epoch=last_step,
             )
         print(
-            f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, resuming from step {max(cur_steps, 0)})"
+            f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, "
+            f"warmup={warmup_steps}, resuming from step {max(cur_steps, 0)})"
         )
 
     diff_net_for_save = diff_net
@@ -230,6 +247,7 @@ def main(args):
         if scheduler is not None:
             print(f"Current LR: {scheduler.get_last_lr()[0]:.6e}")
 
+        global_step_start = e * steps_per_epoch
         train_losses = train_epoch(
             diff,
             train_loader,
@@ -238,9 +256,12 @@ def main(args):
             1.0,
             ema_net,
             args.loss_type,
+            ema_decay=opt_config.get("ema_decay", 0.9999),
+            ema_warmup_steps=int(opt_config.get("ema_warmup_steps", 2000)),
             mp_dtype=mp_dtype,
             scheduler=scheduler,
             use_fsdp=False,
+            global_step_start=global_step_start,
         )
 
         torch.cuda.empty_cache()
@@ -421,6 +442,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-config", type=str, default="model_config.json")
 
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--warmup-steps", type=int, default=None, help="Override the LR warmup steps from opt_config.json (0 disables warmup)")
     parser.add_argument("--resume-dir", type=str, default="", help="HF Hub checkpoint folder (download then resume)")
     parser.add_argument("--resume-local", type=str, default="", help="Local checkpoint directory (no download)")
 

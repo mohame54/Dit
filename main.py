@@ -6,7 +6,7 @@ import argparse
 import traceback
 import pandas as pd
 from torch.distributed import init_process_group, destroy_process_group, barrier, broadcast
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.optim.lr_scheduler import StepLR
 from train_utils import train_epoch, val_epoch, compute_fid_score
 from utils import (
     get_vae,
@@ -17,7 +17,10 @@ from utils import (
     images_to_grid,
     set_seed,
     download_checkpoint_from_hf,
-    SCALE_CONSTANT
+    build_adamw_param_groups,
+    build_warmup_cosine_scheduler,
+    enable_perf_flags,
+    SCALE_CONSTANT,
 )
 from Diffusion import RFDiffusion
 from fsdp_utils import ( 
@@ -44,6 +47,7 @@ def main(args):
     use_fsdp = args.dist_mode == "fsdp"
     assert torch.cuda.is_available(), "CUDA is required for distributed training"
     set_seed()
+    enable_perf_flags()
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     ddp_rank = int(os.environ['RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
@@ -196,12 +200,25 @@ def main(args):
         opt_config['lr'] = args.lr
         if master_process:
             print(f"LR overridden via --lr: {args.lr}")
+    if args.warmup_steps is not None:
+        opt_config['warmup_steps'] = args.warmup_steps
+        if master_process:
+            print(f"Warmup steps overridden via --warmup-steps: {args.warmup_steps}")
     # For DDP, the optimizer needs the unwrapped model's parameters
     model_for_opt = diff_net if use_fsdp else diff_net.module
     if args.use_moun:
         optim = DualOpt(model_for_opt, lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
     else:
-        optim = torch.optim.AdamW(model_for_opt.parameters(), lr=opt_config['lr'], weight_decay=opt_config['weight_decay'])
+        param_groups = build_adamw_param_groups(
+            model_for_opt, weight_decay=opt_config['weight_decay'], verbose=master_process
+        )
+        betas = tuple(opt_config.get('betas', (0.9, 0.95)))
+        optim = torch.optim.AdamW(
+            param_groups,
+            lr=opt_config['lr'],
+            betas=betas,
+            fused=torch.cuda.is_available(),
+        )
    
     if opt_path is not None and os.path.exists(opt_path):
         if use_fsdp:
@@ -223,14 +240,24 @@ def main(args):
     if args.use_scheduler:
         # last_epoch in PyTorch scheduler actually means last_step here since we step per optimizer step
         last_step = cur_steps - 1  # -1 because PyTorch uses -1 for "no steps done yet"
-        
+        warmup_steps = int(opt_config.get('warmup_steps', 0))
+
         if args.scheduler_type == "cosine":
-            scheduler = CosineAnnealingLR(optim, T_max=total_steps, eta_min=opt_config.get('min_lr', 8e-6), last_epoch=last_step)
+            scheduler = build_warmup_cosine_scheduler(
+                optim,
+                total_steps=total_steps,
+                warmup_steps=warmup_steps,
+                min_lr=opt_config.get('min_lr', 8e-6),
+                last_step=last_step,
+            )
         elif args.scheduler_type == "step":
             scheduler = StepLR(optim, step_size=args.scheduler_step_size, gamma=args.scheduler_gamma, last_epoch=last_step)
-        
+
         if master_process:
-            print(f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, resuming from step {max(cur_steps, 0)})")
+            print(
+                f"Using {args.scheduler_type} scheduler (step-based, {total_steps} total steps, "
+                f"warmup={warmup_steps}, resuming from step {max(cur_steps, 0)})"
+            )
     
     barrier()
 
@@ -297,8 +324,22 @@ def main(args):
                 print(f"Current LR: {scheduler.get_last_lr()[0]:.6e}")
         
         # Training phase - all GPUs participate
-        # Training phase - all GPUs participate
-        train_losses = train_epoch(diff, train_loader, optim, local_rank, 1.0, ema_net, args.loss_type, mp_dtype=mp_dtype, scheduler=scheduler, use_fsdp=use_fsdp)
+        global_step_start = e * steps_per_epoch
+        train_losses = train_epoch(
+            diff,
+            train_loader,
+            optim,
+            local_rank,
+            1.0,
+            ema_net,
+            args.loss_type,
+            ema_decay=opt_config.get('ema_decay', 0.9999),
+            ema_warmup_steps=int(opt_config.get('ema_warmup_steps', 2000)),
+            mp_dtype=mp_dtype,
+            scheduler=scheduler,
+            use_fsdp=use_fsdp,
+            global_step_start=global_step_start,
+        )
         
         barrier()
         torch.cuda.empty_cache()
@@ -541,6 +582,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume-dir", type=str, help="Directory inside the HF Hub repo to download and resume from")
     parser.add_argument("--resume-local", type=str, default="", help="Local checkpoint directory to resume from (skips HF Hub download)")
     parser.add_argument("--lr", type=float, default=None, help="Override the learning rate from opt_config.json (useful when resuming)")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="Override the LR warmup steps from opt_config.json (0 disables warmup)")
 
     # torch.compile
     parser.add_argument("--compile", type=str_to_bool, default=False, help="Compile models with torch.compile for faster training and inference (requires PyTorch >= 2.0)")

@@ -4,7 +4,7 @@ from Diffusion import RFDiffusion
 import torch.distributed as dist
 import torch
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from utils import SCALE_CONSTANT
+from utils import SCALE_CONSTANT, get_ema_decay
 
 
 def train_epoch(
@@ -15,17 +15,20 @@ def train_epoch(
     max_norm=None,
     ema_model=None,
     loss_type="mse_loss",
-    ema_decay=0.999,
+    ema_decay=0.9999,
+    ema_warmup_steps=2000,
     grad_accum_steps=1,
     mp_dtype=torch.float16,
     scheduler=None,
     use_fsdp=True,
     log_every=50,
+    global_step_start=0,
 ):
     diff.model.train()
     losses = []
     loop = tqdm(train_ds, desc="Training") if rank == 0 else train_ds
-    
+    global_step = global_step_start
+
     # Only use scaler for float16 to prevent underflow
     # bfloat16 has enough dynamic range and doesn't need scaling
     use_scaler = (mp_dtype == torch.float16)
@@ -74,9 +77,14 @@ def train_epoch(
         
             if scheduler is not None:
                 scheduler.step()
-            
+
             if ema_model is not None:
-                update_ema_model(diff.model, ema_model, ema_decay)
+                effective_decay = get_ema_decay(
+                    global_step, base_decay=ema_decay, warmup=ema_warmup_steps
+                )
+                update_ema_model(diff.model, ema_model, effective_decay)
+
+            global_step += 1
         
         # Avoid an all_reduce every step — that is a hard sync barrier that stalls
         # the GPU pipeline. Instead, log the local loss value and only synchronize
@@ -95,34 +103,44 @@ def train_epoch(
 
 @torch.no_grad()
 def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss", mp_dtype=None, distributed: bool = True):
+   
     diff.model.eval()
-    losses = []
+    local_losses = []  # tensors kept on device until the final reduction
     loop = tqdm(val_ds, desc="Validation") if rank == 0 else val_ds
-    
+
     for inputs, labels in loop:
-        
         inputs = inputs.to(rank, non_blocking=True)
         labels = labels.to(rank, non_blocking=True)
-        
+
         with torch.amp.autocast(device_type="cuda", dtype=mp_dtype) if mp_dtype is not None else nullcontext():
             loss = diff.rectified_flow_loss(inputs, labels, loss_type=loss_type)
-        
-        # Synchronize loss across all ranks
-        if distributed:
-            dist.all_reduce(loss, op=dist.ReduceOp.AVG)
-        
-        # All ranks compute, but only rank 0 logs
-        if rank == 0:
-            losses.append(loss.item())
-            loop.set_postfix({"val_loss": f"{sum(losses)/len(losses):.4f}"})
-    
-    return losses if rank == 0 else []
+
+        local_losses.append(loss.detach())
+
+        # Cheap local-only running average for the progress bar (no NCCL sync).
+        # Refresh sparsely to keep the host->device sync cost negligible.
+        if rank == 0 and len(local_losses) % 10 == 0:
+            running = torch.stack(local_losses).mean().item()
+            loop.set_postfix({"val_loss": f"{running:.4f}"})
+
+    if not local_losses:
+        return []
+
+    losses_tensor = torch.stack(local_losses)
+    if distributed:
+        dist.all_reduce(losses_tensor, op=dist.ReduceOp.AVG)
+
+    if rank == 0:
+        return losses_tensor.cpu().tolist()
+    return []
 
 
 def update_ema_model(model, ema_model, decay):
     with torch.no_grad():
         for ema_p, p in zip(ema_model.parameters(), model.parameters()):
             ema_p.mul_(decay).add_(p, alpha=1 - decay)
+        for ema_b, b in zip(ema_model.buffers(), model.buffers()):
+            ema_b.copy_(b)
 
 
 @torch.no_grad()

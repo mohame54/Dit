@@ -51,6 +51,7 @@ LOGS_DIR="logs"
 RESUME_DIR=""
 RESUME_LOCAL=""       # local checkpoint path; skips HF Hub download (e.g. checkpoints/v2/checkpoint_400)
 LR=""                 # empty = use value from scripts/opt_config.json
+WARMUP_STEPS=""       # empty = use value from opt_config.json (0 disables warmup)
 RUN_NAME=""           # empty = use CHECKPOINTS_DIR/LOGS_DIR as-is; set to scope under a subfolder (e.g. v2)
 NUM_WORKERS=4         # DataLoader workers per GPU; increase if GPU idles waiting for data
 
@@ -102,6 +103,7 @@ Resume:
   --resume DIR            HF Hub checkpoint folder name  (e.g. checkpoint_300) – downloads from Hub
   --resume-local PATH     Local checkpoint directory     (e.g. checkpoints/v2/checkpoint_400) – no download
   --lr FLOAT              Override learning rate  (e.g. 5e-5); default: value in scripts/opt_config.json
+  --warmup-steps N        Override LR warmup steps (0 disables); default: value in opt_config.json
   --run-name NAME         Scope checkpoints/logs under a subfolder (e.g. v2 → checkpoints/v2/, logs/v2/)
   --num-workers N         DataLoader workers per GPU     (default: $NUM_WORKERS)
 EOF
@@ -156,6 +158,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --lr)                  LR="$2";                 shift 2 ;;
+        --warmup-steps)        WARMUP_STEPS="$2";       shift 2 ;;
         --run-name)            RUN_NAME="$2";           shift 2 ;;
         --num-workers)         NUM_WORKERS="$2";        shift 2 ;;
         *)
@@ -273,6 +276,9 @@ fi
 if [[ -n "$LR" ]]; then
     printf "   %-20s %s\n" "LR override:" "$LR"
 fi
+if [[ -n "$WARMUP_STEPS" ]]; then
+    printf "   %-20s %s\n" "Warmup override:" "$WARMUP_STEPS"
+fi
 echo "============================================================"
 echo ""
 
@@ -286,6 +292,11 @@ fi
 LR_ARGS=""
 if [[ -n "$LR" ]]; then
     LR_ARGS="--lr ${LR}"
+fi
+
+WARMUP_ARGS=""
+if [[ -n "$WARMUP_STEPS" ]]; then
+    WARMUP_ARGS="--warmup-steps ${WARMUP_STEPS}"
 fi
 
 if [[ "$NUM_GPUS" -eq 1 ]]; then
@@ -312,7 +323,8 @@ if [[ "$NUM_GPUS" -eq 1 ]]; then
         --fid-feature       "$FID_FEATURE"      \
         --num-workers       "$NUM_WORKERS"      \
         $RESUME_ARGS \
-        $LR_ARGS
+        $LR_ARGS \
+        $WARMUP_ARGS
 else
     torchrun --nproc_per_node="$NUM_GPUS" main.py \
         --epochs            "$EPOCHS"           \
@@ -338,5 +350,6 @@ else
         --fid-feature       "$FID_FEATURE"      \
         --num-workers       "$NUM_WORKERS"      \
         $RESUME_ARGS \
-        $LR_ARGS
+        $LR_ARGS \
+        $WARMUP_ARGS
 fi

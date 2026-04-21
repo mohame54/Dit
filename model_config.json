@@ -1,7 +1,7 @@
 {
   "freq_dim": 256,
   "hidden_dim": 512,
-  "num_blocks": 12,
+  "num_blocks": 16,
   "bias": true,
   "qkv_bias": false,
   "num_classes": 3,

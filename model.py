@@ -236,12 +236,14 @@ class DitModel(nn.Module):
       return x
 
   def init_weights(self):
-      def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-      self.apply(_basic_init)
+      # Delegated to a shared helper that does Xavier on Linears, zero-init on
+      # AdaLN modulation Linears (the DiT trick — each block starts as identity),
+      # zero-init on `final_add_norm` and `lin_final` (initial output is zero),
+      # and Normal(0, 0.02) on the learnable positional embedding `pos_embd`
+      # (the default Normal(0, 1) is way too large and dominates the patch
+      # embeddings early in training).
+      from utils import dit_init_weights
+      dit_init_weights(self, pos_embd_std=0.02)
 
   def forward(self, x, t, cond=None):
       x = self.patch_embd(x)

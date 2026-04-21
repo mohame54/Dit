@@ -66,16 +66,33 @@ class DualOpt:
         moun_params = []
         adam_params_decay = []
         adam_params_no_decay = []
+        leftover_names = []
 
         for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
             if n in moun_params_names:
                 moun_params.append(p)
             elif n in adam_params_names_decay:
                 adam_params_decay.append(p)
-
             elif n in adam_params_names_no_dacay:
                 adam_params_no_decay.append(p)
-        
+            else:
+                # Fallback for raw nn.Parameter (e.g. pos_embd, cls_token) or
+                # any module type not enumerated above. Apply best-practice
+                # rule: 1-D params -> no decay, multi-dim -> decay.
+                if p.ndim <= 1 or n.endswith(".bias"):
+                    adam_params_no_decay.append(p)
+                else:
+                    adam_params_decay.append(p)
+                leftover_names.append(n)
+
+        if leftover_names:
+            print(
+                f"[DualOpt] Routed {len(leftover_names)} unmatched param(s) to AdamW via fallback: "
+                f"{leftover_names[:10]}{'...' if len(leftover_names) > 10 else ''}"
+            )
+
         self.moun_param_num = len(moun_params)
         self.adam_param_num = len(adam_params_no_decay) + len(adam_params_decay)
         self.moun = moun_cls(moun_params, **moun_kwargs)
