@@ -38,7 +38,8 @@ class RFDiffusion(ODSolversMixin):
         sigma=1.0,
         mu=0.0,
         sampler_dist="logit_normal",
-        sampling_method="rk"
+        sampling_method="rk",
+        shift=1.0,
     ):
         super(RFDiffusion, self).__init__()
         self.model = model
@@ -47,16 +48,62 @@ class RFDiffusion(ODSolversMixin):
         self.sampler_dist = sampler_dist
         self.mu = mu
         self.n_steps = n_steps
+        self.shift = shift
         self.set_sampling_method(sampling_method)
 
+    def set_model(self, model):
+        self.model = model
+
+    def set_vae(self, vae):
+        self.vae = vae
+
     def set_sigma(self, sigma: float):
-        self.sigma = sigma
+        self.sigma = float(sigma)
+
+    def set_mu(self, mu: float):
+        self.mu = float(mu)
+
+    def set_n_steps(self, n_steps: int):
+        self.n_steps = int(n_steps)
+
+    def set_shift(self, shift: float):
+        if shift <= 0:
+            raise ValueError(f"shift must be > 0, got {shift}")
+        self.shift = float(shift)
 
     def set_sampling_method(self, method: str):
         method = method.lower()
-        if method not in ["euler", "rk"]:
-            raise ValueError(f"Unknown sampling_method: {method}")
+        if method not in ["euler", "rk", "rk4", "ab2"]:
+            raise ValueError(
+                f"Unknown sampling_method: {method!r}. "
+                "Choose from 'euler', 'rk' (Heun), 'rk4', or 'ab2'."
+            )
         self.sampling_method = method
+
+    def set_sampler_dist(self, sampler_dist: str):
+        if sampler_dist not in ["uniform", "logit_normal"]:
+            raise ValueError(
+                f"Unknown sampler_dist: {sampler_dist!r}. "
+                "Choose from 'uniform' or 'logit_normal'."
+            )
+        self.sampler_dist = sampler_dist
+
+    @staticmethod
+    def _shift_timesteps(t: torch.Tensor, shift: float) -> torch.Tensor:
+        """Apply Flux/SD3-style timestep shifting.
+
+        Maps uniform t ∈ [0,1] to a shifted schedule via the Möbius transform:
+            t_shifted = shift * t / (1 + (shift - 1) * t)
+
+        shift=1.0  →  identity (uniform spacing, current default)
+        shift=3.0  →  SD3 fixed shift; steps are denser near t=1 (noisy end)
+        shift>1    →  more model evaluations in the high-noise region where
+                       the velocity field is less straight, improving quality
+                       at the same number of steps.
+        """
+        if shift == 1.0:
+            return t
+        return shift * t / (1.0 + (shift - 1.0) * t)
 
     def sample_t(self, batch_sz: int, min_val=1e-6, max_val=1.0-1e-6, device="cpu"):
         if self.sampler_dist == "uniform":
@@ -68,12 +115,6 @@ class RFDiffusion(ODSolversMixin):
         t = t.clamp(min=min_val, max=max_val)
         return t.to(device)
         
-    def set_sampler_dist(self, sampler_dist: str):
-        self.sampler_dist = sampler_dist
-
-    def set_model(self, model):
-        self.model = model
-
     def to_t_inds(self, t: torch.Tensor):
         # Clamp to [0, n_steps-1] so inference (which starts at t=1.0) never
         # produces index n_steps, which is outside the training distribution.
@@ -125,10 +166,13 @@ class RFDiffusion(ODSolversMixin):
         if z_init is None:  
             z_init = torch.randn(shape, device=device)
         shape = z_init.shape
-        dt = 1.0 / float(steps)
-        steps += 1 # include t=0
+        steps += 1  # include t=0
         x = z_init
-        t_vals = torch.linspace(self.n_steps, 0.0, steps, device=device) / self.n_steps
+        # Build a uniform schedule then apply the Flux/SD3 shift so that
+        # more steps are spent in the high-noise region (near t=1) where
+        # the velocity field is less straight.
+        t_uniform = torch.linspace(self.n_steps, 0.0, steps, device=device) / self.n_steps
+        t_vals = self._shift_timesteps(t_uniform, self.shift)
         traj = []
         if return_traj:
             traj.append(x.cpu())
@@ -154,8 +198,18 @@ class RFDiffusion(ODSolversMixin):
                out = out_uncond + cfg_fac * (out_cond - out_uncond)
             return out
            
+        # AB2 needs the previous step's velocity; seed it with None so the
+        # first step falls back to an Euler warm-up automatically.
+        prev_v = None
+
         for i in range(steps - 1):  # Stop one step before to avoid index error
             t = t_vals[i]
+            t_next = t_vals[i + 1]
+            # Per-step dt: distance along t for this interval (always positive).
+            # With a shifted schedule the intervals are non-uniform, so we
+            # compute dt from the actual t_vals rather than using a fixed scalar.
+            dt = (t - t_next).item()
+
             # Use .item() so torch.full receives a Python scalar, not a 0-d
             # tensor. A 0-d tensor as fill_value triggers a value guard under
             # torch.compile causing a retrace for every unique timestep.
@@ -163,13 +217,31 @@ class RFDiffusion(ODSolversMixin):
             t_batch = self.to_t_inds(t_batch)
 
             v = model_fn(x, t_batch)
+
             if self.sampling_method == "euler":
                 x = self.euler_step(x, dt, v)
 
             elif self.sampling_method == "rk":
-                t_batch_next = torch.full((x.shape[0],), fill_value=t_vals[i + 1].item(), device=device)
+                t_batch_next = torch.full((x.shape[0],), fill_value=t_next.item(), device=device)
                 t_batch_next = self.to_t_inds(t_batch_next)
                 x = self.rk2_step(x, dt, v, t_batch_next, model_fn)
+
+            elif self.sampling_method == "rk4":
+                t_mid_val = (t.item() + t_next.item()) / 2.0
+                t_batch_mid = torch.full((x.shape[0],), fill_value=t_mid_val, device=device)
+                t_batch_mid = self.to_t_inds(t_batch_mid)
+                t_batch_next = torch.full((x.shape[0],), fill_value=t_next.item(), device=device)
+                t_batch_next = self.to_t_inds(t_batch_next)
+                x = self.rk4_step(x, dt, v, t_batch_mid, t_batch_next, model_fn)
+
+            elif self.sampling_method == "ab2":
+                if prev_v is None:
+                    # Euler warm-up for the very first step
+                    x = self.euler_step(x, dt, v)
+                else:
+                    x = self.ab2_step(x, dt, v, prev_v)
+                prev_v = v
+
             else:
                 raise ValueError(f"Unknown sampling_method: {self.sampling_method}")
             if return_traj:

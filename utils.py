@@ -3,6 +3,7 @@ import json
 import torch
 import random
 import numpy as np
+from contextlib import contextmanager
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, DistributedSampler
@@ -466,3 +467,28 @@ def set_seed(seed=42):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+@contextmanager
+def fixed_seed(seed: int = 42, device=None):
+    """Context manager that runs a block with a fixed RNG seed then restores
+    the previous RNG state exactly, leaving training unaffected.
+
+    Usage::
+
+        with fixed_seed(42, device=device):
+            samples = diff.generate(...)
+    """
+    cpu_state = torch.get_rng_state()
+    gpu_state = torch.cuda.get_rng_state(device) if torch.cuda.is_available() else None
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    try:
+        yield
+    finally:
+        torch.set_rng_state(cpu_state)
+        if gpu_state is not None:
+            torch.cuda.set_rng_state(gpu_state, device)

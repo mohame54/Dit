@@ -16,6 +16,7 @@ from utils import (
     upload_file_paths_to_hf,
     images_to_grid,
     set_seed,
+    fixed_seed,
     download_checkpoint_from_hf,
     build_adamw_param_groups,
     build_warmup_cosine_scheduler,
@@ -385,8 +386,11 @@ def main(args):
         # FID computation (independent of checkpoint saving frequency)
         if args.fid_freq > 0 and (e + 1) % args.fid_freq == 0:
             if master_process:
-                print(f"Computing FID at epoch {e + 1}...")
+                print(f"Computing FID at epoch {e + 1} (using EMA model)...")
             try:
+                # Use the EMA model for FID — it produces cleaner samples and
+                # gives a more reliable signal of true generative quality.
+                diff.set_model(ema_net)
                 # All ranks participate (generate() needs FSDP shards from all ranks)
                 fid_score = compute_fid_score(
                     diff=diff,
@@ -411,6 +415,7 @@ def main(args):
                     print(f"FID computation failed at epoch {e + 1}: {ex}")
                     traceback.print_exc()
             finally:
+                diff.set_model(diff_net)
                 barrier()
                 torch.cuda.empty_cache()
         
@@ -453,7 +458,6 @@ def main(args):
             
             barrier()  # Wait for all ranks to finish saving
             
-            samples_eps_path = os.path.join(dir_path, "samples.png")
             samples_ema_path = os.path.join(dir_path, "ema_sample.png")
             
             should_generate = use_fsdp or master_process
@@ -463,34 +467,30 @@ def main(args):
             
             try:
                 if should_generate:
-                    conditions_labels = ["bird", "cat", "dog"] * 2
+                    # 4 samples per class → 12-image grid (4 columns × 3 rows)
+                    conditions_labels = ["bird", "cat", "dog"] * 4
 
+                    diff.set_model(ema_net)
                     diff.model.eval()
-                    with torch.no_grad():
-                        samples = diff.generate(
-                            args.num_gen_steps,
-                            conditions_labels,
-                            device=device,
-                            latent_shape=(4, 32, 32),
-                            return_trj=False
-                        )
-
-                        diff.set_model(ema_net)
+                    with torch.no_grad(), fixed_seed(42, device=device):
+                        # fixed_seed ensures the same starting noise at every
+                        # checkpoint for a clean apples-to-apples visual
+                        # comparison across epochs.
                         ema_samples = diff.generate(
                             args.num_gen_steps,
                             conditions_labels,
+                            cfg_fac=args.sample_cfg_fac,
                             device=device,
                             latent_shape=(4, 32, 32),
                             return_trj=False
                         )
-                        diff.set_model(diff_net)
+
+                    diff.set_model(diff_net)
                     diff.model.train()
 
                     # Only master saves the results
                     if master_process:
-                        eps_grid = images_to_grid(samples, 3)
-                        ema_grid = images_to_grid(ema_samples, 3)
-                        eps_grid.save(samples_eps_path, format="PNG")
+                        ema_grid = images_to_grid(ema_samples, 4)
                         ema_grid.save(samples_ema_path, format="PNG")
                         print(f"Sample images saved")
                         
@@ -502,7 +502,6 @@ def main(args):
                                     ema_path,
                                     weights_path,
                                     samples_ema_path,
-                                    samples_eps_path,
                                     os.path.join(dir_path, "train_logs.txt"),
                                     os.path.join(dir_path, "val_logs.txt"),
                                     os.path.join(dir_path, "fid_logs.txt"),
@@ -587,6 +586,9 @@ if __name__ == "__main__":
     # torch.compile
     parser.add_argument("--compile", type=str_to_bool, default=False, help="Compile models with torch.compile for faster training and inference (requires PyTorch >= 2.0)")
     parser.add_argument("--compile-mode", type=str, default="reduce-overhead", choices=["default", "reduce-overhead", "max-autotune"], help="torch.compile mode: 'default' balances compile time and speed, 'reduce-overhead' minimises kernel-launch overhead (good for fixed shapes), 'max-autotune' maximises throughput at the cost of a longer initial compile")
+
+    # Sample generation
+    parser.add_argument("--sample-cfg-fac", type=float, default=4.0, help="CFG scale used when generating checkpoint sample images")
 
     # FID evaluation
     parser.add_argument("--fid-freq", type=int, default=20, help="Compute FID every N epochs (0 = disabled)")

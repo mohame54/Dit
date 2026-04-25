@@ -13,11 +13,11 @@
   "img_size": 32,
   "in_chs": 4,
   "out_chs": 4,
-  "drop_rate": 0.1,
+  "drop_rate": 0.2,
   "add_conv_final": false,
   "add_norm_embd": false,
   "use_gate_mlp": true,
   "mlp_bias": false,
   "flip_sin_to_cos": true,
-  "label_drop_prob": 0.1
+  "label_drop_prob": 0.12
 }

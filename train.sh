@@ -24,7 +24,7 @@ GDRIVE_DATA_ID="1I1uTVrPTwL3_rHyNVWpCMaFNWH0KpC2_"   # latent_data.zip
 GDRIVE_CSV_ID="1HcVqvUxY0ddJHWj2g5P0fZQYB9DPpKjT"                                        # latent_vector_mapping.csv (leave empty to skip)
 CUDA_VERSION="cu121"          # change to cu118 / cu124 / cu126 etc. as needed
 
-NUM_GPUS=2
+NUM_GPUS=1
 EPOCHS=1000
 CUR_EPOCHS=0
 TRAIN_BATCH_SZ=128
@@ -40,9 +40,9 @@ PUSH_HUB="True"
 USE_SCHEDULER="True"
 SCHEDULER_TYPE="cosine"
 SAVE_BEST="False"
-FID_FREQ=0
+FID_FREQ=25
 FID_BATCH_SIZE=16
-NUM_FID_SAMPLES=128
+NUM_FID_SAMPLES=256
 FID_FEATURE=64
 
 DATA_DIR="content"
@@ -216,7 +216,7 @@ fi
 # ─────────────────────────────────────────────────────────────
 # 4a. Download latent_vector_mapping.csv (skip if already uploaded)
 # ─────────────────────────────────────────────────────────────
-if [[ ! -f "content/latent_vector_mapping.csv" ]]; then
+if [[ ! -f "latent_vector_mapping.csv" ]]; then
     if [[ -n "$GDRIVE_CSV_ID" ]]; then
         echo "==> Downloading latent_vector_mapping.csv from Google Drive..."
         gdown "https://drive.google.com/uc?id=${GDRIVE_CSV_ID}" -O latent_vector_mapping.csv
@@ -232,7 +232,7 @@ fi
 # ─────────────────────────────────────────────────────────────
 # 4b. Download and extract latent vectors zip (skip if already present)
 # ─────────────────────────────────────────────────────────────
-if [[ ! -d "latent_vectors" ]]; then
+if [[ ! -d "content/latent_vectors" ]]; then
     echo "==> Downloading latent_data.zip from Google Drive..."
     gdown "https://drive.google.com/uc?id=${GDRIVE_DATA_ID}" -O latent_data.zip
 

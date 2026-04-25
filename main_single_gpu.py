@@ -16,6 +16,7 @@ from utils import (
     upload_file_paths_to_hf,
     images_to_grid,
     set_seed,
+    fixed_seed,
     download_checkpoint_from_hf,
     build_adamw_param_groups,
     build_warmup_cosine_scheduler,
@@ -299,8 +300,9 @@ def main(args):
                 f.write(f"{train_loss:.6f}\n")
 
         if args.fid_freq > 0 and (e + 1) % args.fid_freq == 0:
-            print(f"Computing FID at epoch {e + 1}...")
+            print(f"Computing FID at epoch {e + 1} (using EMA model)...")
             try:
+                diff.set_model(ema_net)
                 fid_score = compute_fid_score(
                     diff=diff,
                     val_ds=val_ds,
@@ -324,6 +326,7 @@ def main(args):
                 print(f"FID computation failed at epoch {e + 1}: {ex}")
                 traceback.print_exc()
             finally:
+                diff.set_model(diff_net)
                 torch.cuda.empty_cache()
 
         should_save = (e + 1) % args.epoch_save_freq == 0 or (is_best and args.save_best)
@@ -346,37 +349,28 @@ def main(args):
                 if os.path.exists(src):
                     shutil.copy(src, os.path.join(dir_path, log_name))
 
-            samples_eps_path = os.path.join(dir_path, "samples.png")
             samples_ema_path = os.path.join(dir_path, "ema_sample.png")
 
             print("Generating sample images...")
             try:
-                conditions_labels = ["bird", "cat", "dog"] * 2
+                # 4 samples per class → 12-image grid (4 columns × 3 rows)
+                conditions_labels = ["bird", "cat", "dog"] * 4
 
+                diff.set_model(ema_net)
                 diff.model.eval()
-                with torch.no_grad():
-                    samples = diff.generate(
-                        args.num_gen_steps,
-                        conditions_labels,
-                        device=device,
-                        latent_shape=(4, 32, 32),
-                        return_trj=False,
-                    )
-
-                    diff.set_model(ema_net)
+                with torch.no_grad(), fixed_seed(42, device=device):
                     ema_samples = diff.generate(
                         args.num_gen_steps,
                         conditions_labels,
+                        cfg_fac=args.sample_cfg_fac,
                         device=device,
                         latent_shape=(4, 32, 32),
                         return_trj=False,
                     )
-                    diff.set_model(diff_net)
+                diff.set_model(diff_net)
                 diff.model.train()
 
-                eps_grid = images_to_grid(samples, 3)
-                ema_grid = images_to_grid(ema_samples, 3)
-                eps_grid.save(samples_eps_path, format="PNG")
+                ema_grid = images_to_grid(ema_samples, 4)
                 ema_grid.save(samples_ema_path, format="PNG")
                 print("Sample images saved")
 
@@ -389,7 +383,6 @@ def main(args):
                                 ema_path,
                                 weights_path,
                                 samples_ema_path,
-                                samples_eps_path,
                                 os.path.join(dir_path, "train_logs.txt"),
                                 os.path.join(dir_path, "val_logs.txt"),
                                 os.path.join(dir_path, "fid_logs.txt"),
@@ -460,8 +453,10 @@ if __name__ == "__main__":
     parser.add_argument("--scheduler-gamma", type=float, default=0.5)
     parser.add_argument("--save-best", type=str_to_bool, default=False)
 
-    parser.add_argument("--fid-freq", type=int, default=20)
-    parser.add_argument("--num-fid-samples", type=int, default=128)
+    parser.add_argument("--sample-cfg-fac", type=float, default=4.0, help="CFG scale used when generating checkpoint sample images")
+
+    parser.add_argument("--fid-freq", type=int, default=25)
+    parser.add_argument("--num-fid-samples", type=int, default=256)
     parser.add_argument("--fid-batch-size", type=int, default=16)
     parser.add_argument("--fid-feature", type=int, default=64, choices=[64, 192, 768, 2048])
 
