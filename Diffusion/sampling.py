@@ -159,6 +159,10 @@ class RFDiffusion(ODSolversMixin):
         device="cpu",
         cfg_fac=2.0
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        # Force eval mode so label_dropout (training-only) never fires during
+        # generation, regardless of what mode the caller left the model in.
+        training = self.model.training
+        self.model.eval()
 
         if z_init is None and not len(shape):
             raise ValueError("Either z_init or shape must be provided")
@@ -246,6 +250,7 @@ class RFDiffusion(ODSolversMixin):
                 raise ValueError(f"Unknown sampling_method: {self.sampling_method}")
             if return_traj:
                 traj.append(x.cpu())
+        self.model.train(training)  # restore original mode
         if return_traj:
             return x, traj
         return x

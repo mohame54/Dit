@@ -22,7 +22,6 @@ class ODSolversMixin:
         t_next,
         model_fn,
     ) -> torch.Tensor:
-        """Heun's method (explicit trapezoidal rule): 2nd-order, 2 NFE/step."""
         x_2 = x - dt * model_output
         model_output_2 = model_fn(x_2, t_next)
         x_next = x - (dt / 2) * (model_output + model_output_2)
