@@ -4,7 +4,7 @@ from Diffusion import RFDiffusion
 import torch.distributed as dist
 import torch
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from utils import SCALE_CONSTANT, get_ema_decay
+from utils import unscale_latent, get_ema_decay
 
 
 def train_epoch(
@@ -153,7 +153,6 @@ def compute_fid_score(
     device,
     gen_labels: list,
     fid_batch_size: int = 16,
-    vae_scale_factor: float = SCALE_CONSTANT,
     mp_dtype=None,
     rank: int = 0,
     fid_feature: int = 2048,
@@ -203,7 +202,7 @@ def compute_fid_score(
             )
             for latents, _ in real_loader:
                 latents = latents.to(device)
-                raw = latents / vae_scale_factor  # undo the SCALE_CONSTANT applied by the dataset
+                raw = unscale_latent(latents)  # undo the SCALE_CONSTANT applied by the dataset
                 with autocast_ctx:
                     decoded = diff.vae.decode(raw).sample
                 decoded = (decoded.float() * 0.5 + 0.5).clamp(0.0, 1.0)

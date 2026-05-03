@@ -1,5 +1,6 @@
 import os
 import json
+import glob
 import torch
 import random
 import numpy as np
@@ -16,8 +17,46 @@ from huggingface_hub import HfApi
 
 
 
-SCALE_CONSTANT = 0.13025
+def compute_dataset_stats(
+    latent_dir: str,
+    max_samples: int = None,
+    pattern: str = "**/*.npy",
+    apply_scaling=True
+):
+    paths = glob.glob(f"{latent_dir}/{pattern}", recursive=True)
+    if max_samples:
+        paths = paths[:max_samples]
+    if not paths:
+        raise FileNotFoundError(f"No files found in {latent_dir}")
 
+    all_latents = []
+    
+    print(f"Loading {len(paths)} samples...")
+    for p in paths:
+        # Load raw latents (no scaling applied yet)
+        lat = np.load(p).astype(np.float32)
+        if apply_scaling:
+            lat = scale_latent(lat)
+        all_latents.append(lat.flatten())
+    
+    # Concatenate all pixels/values into one giant array for global stats
+    all_latents = np.concatenate(all_latents)
+    
+    dataset_mean = float(np.mean(all_latents))
+    dataset_std = float(np.std(all_latents))
+    scale_constant = round(1.0 / dataset_std, 5)
+    dataset_mean = round(dataset_mean, 5)
+    
+    # The constants you need:
+    env_scale_constant = float(os.getenv("SCALE_CONSTANT"))
+    env_dataset_mean = float(os.getenv("DATASET_MEAN"))
+    print(f"--- Results ---")
+    print(f"Raw Mean: {dataset_mean:.5f}")
+    print(f"Raw Std:  {dataset_std:.5f}")
+    print(f"Recommended vs ENV found attribute SCALE_CONSTANT : {scale_constant:.5f}/{env_scale_constant:.5f}")
+    print(f"Recommended vs ENV SHIFT_CONSTANT (to zero mean): {dataset_mean:.5f}/{env_dataset_mean:.5f}")
+    
+    return scale_constant, dataset_mean
 
 def enable_perf_flags(allow_tf32=True, cudnn_benchmark=True, matmul_precision="high"):
     if allow_tf32:
@@ -40,17 +79,6 @@ def _zero_init_(module):
 
 
 def dit_init_weights(model, pos_embd_std=0.02, verbose=False):
-    """DiT-style initialization (the trick from the DiT paper).
-
-    1) Xavier-uniform on every nn.Linear weight, zero bias.
-    2) Zero-init the AdaLN modulation Linear (the last Linear inside any
-       module whose class name is 'AdaNorm', accessed via its `.proj`),
-       so each transformer block starts as the identity function.
-    3) Zero-init `model.final_add_norm` (its last Linear) and `model.lin_final`,
-       so the network's initial output is zero.
-    4) Init `model.pos_embd` (raw nn.Parameter) with Normal(0, pos_embd_std)
-       instead of the much-too-large default Normal(0, 1).
-    """
     n_xavier = 0
     for m in model.modules():
         if isinstance(m, nn.Linear):
@@ -91,12 +119,6 @@ def dit_init_weights(model, pos_embd_std=0.02, verbose=False):
 def build_warmup_cosine_scheduler(
     optim, total_steps, warmup_steps=0, min_lr=0.0, last_step=-1, start_factor=1e-3
 ):
-    """Linear warmup followed by cosine decay.
-
-    If `warmup_steps <= 0`, falls back to a plain CosineAnnealingLR (drop-in
-    replacement). When resuming, pass `last_step` = number of optimizer steps
-    already completed - 1 (matching PyTorch's `last_epoch` convention).
-    """
     from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
     if warmup_steps <= 0:
@@ -421,11 +443,15 @@ def images_to_grid(images, rows):
 
 
 def scale_latent(latent):
-    return latent * SCALE_CONSTANT
+    env_scale_constant = float(os.getenv("SCALE_CONSTANT"))
+    env_dataset_mean = float(os.getenv("DATASET_MEAN"))
+    return (latent - env_dataset_mean) * env_scale_constant
 
 
 def unscale_latent(latent):
-    return latent * (1 / SCALE_CONSTANT)
+    env_scale_constant = float(os.getenv("SCALE_CONSTANT"))
+    env_dataset_mean = float(os.getenv("DATASET_MEAN"))
+    return latent * (1 / env_scale_constant) + env_dataset_mean
 
 
 def postprocess(img):

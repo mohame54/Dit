@@ -21,7 +21,7 @@ from utils import (
     build_adamw_param_groups,
     build_warmup_cosine_scheduler,
     enable_perf_flags,
-    SCALE_CONSTANT,
+    compute_dataset_stats,
 )
 from Diffusion import RFDiffusion
 from single_gpu_utils import (
@@ -44,6 +44,15 @@ def main(args):
     train_df = pd.read_csv(os.path.join(args.data_dir_path, "train.csv"))
     val_df = pd.read_csv(os.path.join(args.data_dir_path, "val.csv"))
     images_dir_pth = args.data_dir_path
+    full_images_dir_path = os.path.join(args.data_dir_path, args.full_images_name)
+    print(f"Full images directory path: {full_images_dir_path}")
+    if os.path.exists(full_images_dir_path):
+        print(f"Full images directory path exists: {full_images_dir_path}")
+        scale_constant, dataset_mean = compute_dataset_stats(full_images_dir_path)
+        print(f"Scale constant: {scale_constant}")
+        print(f"Dataset mean: {dataset_mean}")
+    else:
+        raise FileNotFoundError(f"Full images directory path does not exist: {full_images_dir_path}")
 
     train_ds = CifarDataset(train_df, base_imgs_path=images_dir_pth, val=False)
     val_ds = CifarDataset(val_df, base_imgs_path=images_dir_pth, val=False)
@@ -312,7 +321,6 @@ def main(args):
                     device=device,
                     gen_labels=["bird", "cat", "dog"],
                     fid_batch_size=args.fid_batch_size,
-                    vae_scale_factor=SCALE_CONSTANT,
                     mp_dtype=mp_dtype if use_mp else None,
                     rank=0,
                     fid_feature=args.fid_feature,

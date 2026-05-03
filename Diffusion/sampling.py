@@ -127,14 +127,14 @@ class RFDiffusion(ODSolversMixin):
         cond=None,
         loss_type="mse_loss",
         min_val=1e-6,
-        max_val=1.0-1e-6
+        max_val=1.0-1e-6,
     ):
         """
-        x0: clean images in [-1,1], shape (B,C,H,W)
+        x0: clean latent tensor, shape (B,C,H,W)
         returns: scalar loss
         """
         B = x0.shape[0]
-        z = torch.randn_like(x0)
+        z = torch.randn_like(x0) * self.shift + self.mu
         t = self.sample_t(B, min_val=min_val, max_val=max_val, device=x0.device)  # (B,)
         t = t.to(dtype=x0.dtype)  # Match dtype for mixed precision
         t_b = t.view(B, 1, 1, 1)
@@ -158,8 +158,8 @@ class RFDiffusion(ODSolversMixin):
         return_traj=False,
         device="cpu",
         cfg_fac=2.0,
-        mu: float = 0.0,
-        noise_scale: float = 1.0,
+        mu: float = None,
+        noise_scale: float = None,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         # Force eval mode so label_dropout (training-only) never fires during
         # generation, regardless of what mode the caller left the model in.
@@ -170,6 +170,8 @@ class RFDiffusion(ODSolversMixin):
             raise ValueError("Either z_init or shape must be provided")
         
         if z_init is None:
+            noise_scale = self.shift if noise_scale is None else noise_scale
+            mu = self.mu if mu is None else mu
             z_init = torch.randn(shape, device=device) * noise_scale + mu
         shape = z_init.shape
         steps += 1  # include t=0

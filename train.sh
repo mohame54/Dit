@@ -43,7 +43,7 @@ SAVE_BEST="False"
 FID_FREQ=25
 FID_BATCH_SIZE=16
 NUM_FID_SAMPLES=1000
-FID_FEATURE=192
+FID_FEATURE=768
 
 DATA_DIR="content"
 CHECKPOINTS_DIR="checkpoints"
@@ -54,7 +54,8 @@ LR=""                 # empty = use value from scripts/opt_config.json
 WARMUP_STEPS=""       # empty = use value from opt_config.json (0 disables warmup)
 RUN_NAME=""           # empty = use CHECKPOINTS_DIR/LOGS_DIR as-is; set to scope under a subfolder (e.g. v2)
 NUM_WORKERS=4         # DataLoader workers per GPU; increase if GPU idles waiting for data
-
+DEFAULT_SCALE_CONSTANT=0.15418
+DEFAULT_DATASET_MEAN=0.49665 
 HF_TOKEN="${HF_TOKEN:-}"
 
 # ─────────────────────────────────────────────────────────────
@@ -211,6 +212,23 @@ if [[ -n "$HF_TOKEN" ]]; then
 else
     echo "WARNING: HF_TOKEN is not set – Hub uploads will fail."
     echo "         Export it before running: export HF_TOKEN=hf_..."
+fi
+
+
+if  [[ -n "$SCALE_CONSTANT" ]]; then
+    export SCALE_CONSTANT
+    echo "==> SCALE_CONSTANT is set: $SCALE_CONSTANT."
+else
+    echo "WARNING: SCALE_CONSTANT USING the default: $DEFAULT_SCALE_CONSTANT."
+    export SCALE_CONSTANT=$DEFAULT_SCALE_CONSTANT
+fi
+
+if  [[ -n "$DATASET_MEAN" ]]; then
+    export DATASET_MEAN
+    echo "==> DATASET_MEAN is set: $DATASET_MEAN."
+else
+    echo "WARNING: DATASET_MEAN USING the default: $DEFAULT_DATASET_MEAN."
+    export DATASET_MEAN=$DEFAULT_DATASET_MEAN
 fi
 
 # ─────────────────────────────────────────────────────────────
