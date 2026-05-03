@@ -64,14 +64,15 @@ def main(args):
     val_df = pd.read_csv(os.path.join(args.data_dir_path, "val.csv"))
     images_dir_pth = args.data_dir_path
     full_images_dir_path = os.path.join(args.data_dir_path, args.full_images_name)
-    print(f"Full images directory path: {full_images_dir_path}")
-    if os.path.exists(full_images_dir_path):
-        print(f"Full images directory path exists: {full_images_dir_path}")
-        scale_constant, dataset_mean = compute_dataset_stats(full_images_dir_path)
-        print(f"Scale constant: {scale_constant}")
-        print(f"Dataset mean: {dataset_mean}")
-    else:
-        raise FileNotFoundError(f"Full images directory path does not exist: {full_images_dir_path}")
+    if local_rank == 0:
+        print(f"Full images directory path: {full_images_dir_path}")
+        if os.path.exists(full_images_dir_path):
+            print(f"Full images directory path exists: {full_images_dir_path}")
+            scale_constant, dataset_mean = compute_dataset_stats(full_images_dir_path)
+            print(f"Scale constant: {scale_constant}")
+            print(f"Dataset mean: {dataset_mean}")
+        else:
+            raise FileNotFoundError(f"Full images directory path does not exist: {full_images_dir_path}")
     
     train_ds = CifarDataset(train_df, base_imgs_path=images_dir_pth, val=False)
     val_ds = CifarDataset(val_df, base_imgs_path=images_dir_pth, val=False)

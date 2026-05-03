@@ -441,6 +441,7 @@ if __name__ == "__main__":
     parser.add_argument("--push-hub", type=str_to_bool, default=True)
     parser.add_argument("--num-gen-steps", type=int, default=64)
     parser.add_argument("--model-config", type=str, default="model_config.json")
+    parser.add_argument("--full-images-name", type=str, default="latent_vectors", help="Noise scale used when generating checkpoint sample images")
 
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--warmup-steps", type=int, default=None, help="Override the LR warmup steps from opt_config.json (0 disables warmup)")
