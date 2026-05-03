@@ -215,20 +215,20 @@ else
 fi
 
 
-if  [[ -n "$SCALE_CONSTANT" ]]; then
+if [[ -n "${SCALE_CONSTANT:-}" ]]; then
     export SCALE_CONSTANT
     echo "==> SCALE_CONSTANT is set: $SCALE_CONSTANT."
 else
     echo "WARNING: SCALE_CONSTANT USING the default: $DEFAULT_SCALE_CONSTANT."
-    export SCALE_CONSTANT=$DEFAULT_SCALE_CONSTANT
+    export SCALE_CONSTANT="$DEFAULT_SCALE_CONSTANT"
 fi
 
-if  [[ -n "$DATASET_MEAN" ]]; then
+if [[ -n "${DATASET_MEAN:-}" ]]; then
     export DATASET_MEAN
     echo "==> DATASET_MEAN is set: $DATASET_MEAN."
 else
     echo "WARNING: DATASET_MEAN USING the default: $DEFAULT_DATASET_MEAN."
-    export DATASET_MEAN=$DEFAULT_DATASET_MEAN
+    export DATASET_MEAN="$DEFAULT_DATASET_MEAN"
 fi
 
 # ─────────────────────────────────────────────────────────────
