@@ -94,7 +94,7 @@ def train_epoch(
         if rank == 0:
             losses.append(loss_scalar)
 
-        if rank == 0 and (i + 1) % log_every == 0:
+        if rank == 0:
             avg = sum(losses[-log_every:]) / len(losses[-log_every:])
             loop.set_postfix({"loss": f"{avg:.4f}"})
     
@@ -119,7 +119,7 @@ def val_epoch(diff: RFDiffusion, val_ds, rank, loss_type="mse_loss", mp_dtype=No
 
         # Cheap local-only running average for the progress bar (no NCCL sync).
         # Refresh sparsely to keep the host->device sync cost negligible.
-        if rank == 0 and len(local_losses) % 10 == 0:
+        if rank == 0:
             running = torch.stack(local_losses).mean().item()
             loop.set_postfix({"val_loss": f"{running:.4f}"})
 
