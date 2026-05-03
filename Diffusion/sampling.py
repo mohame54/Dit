@@ -157,7 +157,9 @@ class RFDiffusion(ODSolversMixin):
         shape=(),
         return_traj=False,
         device="cpu",
-        cfg_fac=2.0
+        cfg_fac=2.0,
+        mu: float = 0.0,
+        noise_scale: float = 1.0,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         # Force eval mode so label_dropout (training-only) never fires during
         # generation, regardless of what mode the caller left the model in.
@@ -167,8 +169,8 @@ class RFDiffusion(ODSolversMixin):
         if z_init is None and not len(shape):
             raise ValueError("Either z_init or shape must be provided")
         
-        if z_init is None:  
-            z_init = torch.randn(shape, device=device)
+        if z_init is None:
+            z_init = torch.randn(shape, device=device) * noise_scale + mu
         shape = z_init.shape
         steps += 1  # include t=0
         x = z_init
@@ -263,7 +265,9 @@ class RFDiffusion(ODSolversMixin):
         device: str = "cuda",
         latent_shape: List[int] = (4, 64, 64),
         label_dict: dict = LABEL_DICT,
-        return_trj: bool = True     
+        return_trj: bool = True,
+        noise_scale: float = 1.0,
+        mu: float = 0.0,
     ):
         if len(labels) > 0 and isinstance(labels[0], str):
             labels = [label_dict[l] + 1 for l in labels]
@@ -280,6 +284,8 @@ class RFDiffusion(ODSolversMixin):
             return_traj=return_trj,
             device=device,
             cfg_fac=cfg_fac,
+            noise_scale=noise_scale,
+            mu=mu,
         )
         if return_trj:
             latents, traj = samples
