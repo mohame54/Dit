@@ -13,7 +13,7 @@ from torchvision import transforms as T
 from typing import Sequence, Optional
 import matplotlib.pyplot as plt
 from huggingface_hub import HfApi
-from huggingface_hub.hf_api import HfFolder
+
 
 
 SCALE_CONSTANT = 0.13025
@@ -161,6 +161,7 @@ def build_adamw_param_groups(model, weight_decay, verbose=False):
     ]
 
 def load_hf_api():
+   from huggingface_hub.hf_api import HfFolder
    HfFolder.save_token(os.getenv("HF_TOKEN"))
    return HfApi()
 
