@@ -68,7 +68,7 @@ def main(args):
         print(f"Full images directory path: {full_images_dir_path}")
         if os.path.exists(full_images_dir_path):
             print(f"Full images directory path exists: {full_images_dir_path}")
-            scale_constant, dataset_mean = compute_dataset_stats(full_images_dir_path)
+            scale_constant, dataset_mean = compute_dataset_stats(full_images_dir_path, apply_scaling=False)
             print(f"Scale constant: {scale_constant}")
             print(f"Dataset mean: {dataset_mean}")
         else:
